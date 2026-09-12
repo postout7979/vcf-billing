@@ -221,6 +221,14 @@ _VSPHERE_TAG_NAME_FRAGMENT = "spheretag"
 # 태그가 있을 때의 정확한 값 형식(JSON 배열 여부 등)까지는 확인하지 못했으므로,
 # "summary|tagJson"은 JSON 배열/문자열 두 형태 모두를 시도하는 방어적 파싱을 한다.
 _PARENT_VCENTER_NAME_FRAGMENTS = ("parentvcenter",)
+
+# [v4.2] VCF Operations 어플라이언스 자기 자신도 보통 그 vCenter가 관리하는 VM들 중
+# 하나로 인벤토리에 함께 나타난다("본인 도메인 자체는 제외"). VM 자신의 게스트
+# 호스트명 프로퍼티(관례상 "net|dnsName" 계열)를 이 정규화된 조각으로 느슨하게 찾아,
+# 연동 계정의 base_url 호스트명과 비교한다 - 게스트 호스트명을 못 찾은 VM은 vCenter
+# 인벤토리상의 VM 이름 자체와도 비교한다(짧은 호스트명을 VM 이름으로 그대로 쓰는
+# 환경이 흔하기 때문).
+_GUEST_HOSTNAME_NAME_FRAGMENTS = ("dnsname", "guesthostname")
 _TAG_NONE_SENTINELS = ("none",)
 # 정규화된 키가 이 값과 "정확히" 일치할 때만 태그로 취급한다(포함 여부가 아니라 완전
 # 일치) - "tag"라는 단어 자체는 다른 무관한 프로퍼티에도 흔히 등장할 수 있어, 사용자
@@ -343,6 +351,14 @@ class VCFOpsRestClient(VCFOpsClient):
         host = urlparse(conn.base_url).hostname or conn.base_url
         self._fallback_vcenter_id = f"fallback-vcenter:{host}"
         self._fallback_vcenter_name = host
+
+        # [v4.2] 이 계정 자신의 VCF Operations 어플라이언스를 인벤토리에서 제외하기
+        # 위한 식별자. FQDN 전체와, 흔히 VM 이름으로 그대로 쓰이는 짧은 호스트명(첫
+        # 라벨) 둘 다와 비교한다 - 예: base_url이 https://vcf-ops.corp.local 이면
+        # "vcf-ops.corp.local"과 "vcf-ops" 둘 다 자기 자신으로 취급한다.
+        own_host = (host or "").strip().lower()
+        self._own_host = own_host
+        self._own_host_short = own_host.split(".")[0] if own_host else ""
 
         if not conn.verify_ssl:
             logger.warning(
@@ -523,6 +539,27 @@ class VCFOpsRestClient(VCFOpsClient):
             "folder_name": name,
         }
 
+    def _is_own_appliance_vm(self, vm_name: str, props: dict) -> bool:
+        """[v4.2] 이 VM이 이 연동 계정 자신의 VCF Operations 어플라이언스인지 판단한다.
+
+        게스트 호스트명 프로퍼티(있으면 우선)와 vCenter 인벤토리상의 VM 이름 둘 다를
+        후보로 놓고, 계정 base_url의 호스트명(FQDN 또는 짧은 호스트명)과 일치하는지
+        본다. own_host를 알 수 없는 상태(base_url 파싱 실패)라면 아무것도 제외하지
+        않는다 - 잘못 제외해서 정상 VM이 사라지는 것보다는, 어플라이언스 자신이 한
+        대 더 보이는 쪽이 안전하다.
+        """
+        if not self._own_host:
+            return False
+        candidates = set()
+        if vm_name:
+            candidates.add(vm_name.strip().lower())
+        hostname_found = _find_property_by_name_fragment(props, _GUEST_HOSTNAME_NAME_FRAGMENTS)
+        if hostname_found:
+            candidates.add(hostname_found[1].strip().lower())
+        if self._own_host in candidates:
+            return True
+        return bool(self._own_host_short) and self._own_host_short in candidates
+
     # -- 조회 -------------------------------------------------------------
     def list_vm_snapshot(self) -> list[VMSnapshot]:
         vm_items = list(self._iter_resources(RESOURCE_KIND_VM))
@@ -595,6 +632,7 @@ class VCFOpsRestClient(VCFOpsClient):
 
         snapshots: list[VMSnapshot] = []
         hierarchy_failures = 0
+        excluded_own_count = 0
 
         for item in vm_items:
             vm_id = item["identifier"]
@@ -603,6 +641,20 @@ class VCFOpsRestClient(VCFOpsClient):
                 props = self._fetch_properties(vm_id)
             except httpx.HTTPError:
                 logger.exception("VM %s(%s) 프로퍼티 조회 실패, 건너뜁니다", vm_name, vm_id)
+                continue
+
+            # [v4.2] 이 연동 계정 자신의 VCF Operations 어플라이언스는 과금 대상
+            # 인벤토리에서 제외한다 ("인벤토리 정보에 operations 본인 도메인 자체는
+            # 제외" 요청) - hierarchy_failures 판정에는 영향을 주지 않도록(진짜 계층
+            # 조회 실패와 구분하기 위해) 카운트 없이 그냥 건너뛴다.
+            if self._is_own_appliance_vm(vm_name, props):
+                logger.info(
+                    "VM %s(%s) 는 이 연동 계정 자신의 어플라이언스(%s)로 판단되어 인벤토리에서 제외합니다",
+                    vm_name,
+                    vm_id,
+                    self._conn.base_url,
+                )
+                excluded_own_count += 1
                 continue
 
             host = vm_host.get(vm_id)
@@ -700,11 +752,15 @@ class VCFOpsRestClient(VCFOpsClient):
         # VM은 있는데 단 한 대도 상위 계층을 못 찾았다면, 십중팔구 RESOURCE_KIND_*
         # 상수가 이 환경과 맞지 않거나(경우 A) relationships 응답 자체를 못 받아온
         # 것이다(경우 B) - vm_count=0인 "성공"으로 조용히 넘어가지 않고, 두 경우를
-        # 구분해서 바로 원인을 알 수 있는 에러로 확실히 실패시킨다.
-        if hierarchy_failures == len(vm_items):
+        # 구분해서 바로 원인을 알 수 있는 에러로 확실히 실패시킨다. [v4.2] 자기 자신의
+        # 어플라이언스로 판단해 건너뛴 VM은 애초에 계층 판정 대상이 아니었으므로
+        # 분모에서 제외한다 - 그렇지 않으면 어플라이언스 1대만 제외되고 나머지가 전부
+        # 정상 처리된 경우에도 "전부 실패"로 잘못 판정될 수 있다.
+        considered = len(vm_items) - excluded_own_count
+        if considered > 0 and hierarchy_failures == considered:
             if not diagnostics["any_children_found"]:
                 raise VCFOpsIntegrationError(
-                    f"VM {len(vm_items)}대 전부 Datacenter/Cluster/HostSystem 하위 관계(relationships) "
+                    f"VM {considered}대 전부 Datacenter/Cluster/HostSystem 하위 관계(relationships) "
                     "자체를 하나도 받지 못했습니다. 이는 RESOURCE_KIND_* 이름이 아니라, relationships "
                     "API 응답 형식 자체가 예상과 다르다는 뜻일 가능성이 높습니다 - 서버 로그에 "
                     "'relationships 응답에서 알려진 키를 찾지 못했습니다'라는 경고가 함께 남았다면 "
@@ -715,7 +771,7 @@ class VCFOpsRestClient(VCFOpsClient):
                 )
             observed = ", ".join(sorted(diagnostics["observed_kinds"])) or "(발견된 종류 없음)"
             raise VCFOpsIntegrationError(
-                f"VM {len(vm_items)}대 전부 Datacenter->Cluster->HostSystem->VM 하위 관계 체인을 "
+                f"VM {considered}대 전부 Datacenter->Cluster->HostSystem->VM 하위 관계 체인을 "
                 f"끝까지 연결하지 못했습니다. 하위 관계에서 실제로 발견된 리소스 종류: {observed}. "
                 f"vcf_ops_client.py 상단의 RESOURCE_KIND_CLUSTER(현재 '{RESOURCE_KIND_CLUSTER}')/"
                 f"RESOURCE_KIND_HOST(현재 '{RESOURCE_KIND_HOST}')를 위 목록에 있는 실제 값으로 "

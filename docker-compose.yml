@@ -67,7 +67,7 @@ services:
       # collector는 별도 컨테이너로 뜨므로 API 프로세스 안에서는 중복 실행하지 않는다.
       RUN_COLLECTOR_IN_PROCESS: "false"
     dns:
-      # [v4.1] Needed to resolve the VCF Operations/Aria Operations hostname
+      # [v4.1] Needed to resolve the VCF Operations hostname
       # when an integration account is created/edited or "가져오기" (sync
       # now) is triggered from the admin UI - see DOCKER_DNS_1/DOCKER_DNS_2
       # in .env.example.
@@ -84,7 +84,7 @@ services:
       dockerfile: docker/collector/Dockerfile
     env_file: .env
     dns:
-      # [v4.1] Needed to resolve the VCF Operations/Aria Operations hostname
+      # [v4.1] Needed to resolve the VCF Operations hostname
       # on every collection cycle - see DOCKER_DNS_1/DOCKER_DNS_2 in
       # .env.example.
       - ${DOCKER_DNS_1:-1.1.1.1}

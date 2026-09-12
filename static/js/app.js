@@ -153,13 +153,23 @@ function fmtDateTimeKst(isoString) {
 
 function syncStatusBadgeHtml(account) {
   const status = account.last_sync_status;
+  // [v4.2] 마지막 동기화 시각을 배지 title(마우스 오버) 안에만 두지 않고, 항상 보이는
+  // 텍스트로도 함께 표시한다 - 관리자가 굳이 마우스를 올려보지 않아도 알 수 있도록.
+  const syncTimeLine = account.last_sync_at
+    ? `<div class="sync-time muted small">마지막 동기화: ${fmtDateTimeKst(account.last_sync_at)}</div>`
+    : "";
   if (status === "success") {
-    return `<span class="status-badge status-ok" title="마지막 수집: ${fmtDateTimeKst(account.last_sync_at)} · VM ${fmtNum(
-      account.last_sync_vm_count
-    )}대">✓ 연동됨</span>`;
+    return (
+      `<span class="status-badge status-ok">✓ 연동됨</span>` +
+      syncTimeLine +
+      `<div class="muted small">VM ${fmtNum(account.last_sync_vm_count)}대 수집됨</div>`
+    );
   }
   if (status === "error") {
-    return `<span class="status-badge status-error" title="${escapeHtml(account.last_sync_error || "")}">✗ 연동 실패</span>`;
+    return (
+      `<span class="status-badge status-error" title="${escapeHtml(account.last_sync_error || "")}">✗ 연동 실패</span>` +
+      syncTimeLine
+    );
   }
   return `<span class="status-badge status-pending">연동 대기</span>`;
 }
@@ -216,12 +226,12 @@ function doLogout() {
 
 async function boot() {
   document.getElementById("login-form").addEventListener("submit", onLoginSubmit);
-  document.getElementById("login-select").addEventListener("change", (e) => {
-    const [email, password] = (e.target.value || "").split("|");
-    document.getElementById("login-email").value = email || "";
-    document.getElementById("login-password").value = password || "";
-  });
   document.getElementById("logout-btn").addEventListener("click", doLogout);
+  document.getElementById("refresh-btn").addEventListener("click", () => refreshCurrentView());
+  document.getElementById("change-password-btn").addEventListener("click", openPasswordModal);
+  document.getElementById("password-modal-close").addEventListener("click", closePasswordModal);
+  document.getElementById("password-cancel-btn").addEventListener("click", closePasswordModal);
+  document.getElementById("password-form").addEventListener("submit", onPasswordFormSubmit);
   document.getElementById("admin-tenant-filter").addEventListener("change", (e) => {
     state.adminTenantFilter = e.target.value;
     loadAdminView();
@@ -366,6 +376,7 @@ function enterApp() {
   document.getElementById("view-user").hidden = isAdmin;
   document.getElementById("view-admin").hidden = !isAdmin;
   document.getElementById("admin-tenant-filter").hidden = !isAdmin;
+  document.getElementById("change-password-btn").hidden = !isAdmin;
 
   if (isAdmin) {
     loadTenantManagement(); // 테넌트 필터 드롭다운 채우기 + 캐시
@@ -381,6 +392,43 @@ function refreshCurrentView() {
     loadAdminView();
   } else {
     loadUserView();
+  }
+}
+
+/* ---------------------------- 비밀번호 변경 (로그인 계정 본인) ---------------------------- */
+
+function openPasswordModal() {
+  document.getElementById("password-form").reset();
+  document.getElementById("password-form-error").hidden = true;
+  document.getElementById("password-modal").hidden = false;
+}
+
+function closePasswordModal() {
+  document.getElementById("password-modal").hidden = true;
+}
+
+async function onPasswordFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("password-form-error");
+  errEl.hidden = true;
+  const currentPassword = document.getElementById("password-current").value;
+  const newPassword = document.getElementById("password-new").value;
+  const confirmPassword = document.getElementById("password-new-confirm").value;
+  if (newPassword !== confirmPassword) {
+    errEl.textContent = "새 비밀번호가 서로 일치하지 않습니다.";
+    errEl.hidden = false;
+    return;
+  }
+  try {
+    await api("/auth/me/password", {
+      method: "PUT",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    closePasswordModal();
+    showToast("비밀번호가 변경되었습니다.", "success");
+  } catch (err) {
+    errEl.textContent = err.message || "변경에 실패했습니다.";
+    errEl.hidden = false;
   }
 }
 
@@ -487,8 +535,7 @@ function openUserDrilldown(projectId) {
   pdfBtn.hidden = !isMonthMode();
   pdfBtn.dataset.projectId = projectId;
   if (isMonthMode()) pdfBtn.textContent = `PDF 결산서 다운로드 (${state.monthValue})`;
-
-  document.getElementById("user-drilldown").scrollIntoView({ behavior: "smooth", block: "start" });
+  // [v4.2] 화면 가운데 팝업(모달)으로 뜨므로 더 이상 페이지를 스크롤할 필요가 없다.
 }
 
 function renderKpiGrid(container, items) {
@@ -661,8 +708,33 @@ async function loadAdminView() {
   renderProjectComparisonChart("admin-project-chart", data.projects);
   renderAggregatedDailyChart("admin-daily-chart", data.projects);
   renderAdminProjectTable(data.projects);
+  renderTenantSummary(data.tenant_id, data.tenant_summaries || []);
 
   document.getElementById("admin-drilldown").hidden = true;
+}
+
+/** [v4.2] "전체 테넌트 (교차 확인)" 조회일 때만 프로젝트 목록 위에 테넌트별 집계를 보여준다.
+ * 특정 테넌트로 필터링한 조회(tenant_id != null)에서는 어차피 테넌트가 하나뿐이라 숨긴다. */
+function renderTenantSummary(tenantId, summaries) {
+  const card = document.getElementById("admin-tenant-summary-card");
+  if (tenantId != null || !summaries.length) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const tbody = document.getElementById("admin-tenant-summary-body");
+  tbody.innerHTML = summaries
+    .map(
+      (t) => `
+    <tr>
+      <td class="vm-name">${escapeHtml(t.tenant_name)} <span class="muted">(${escapeHtml(t.tenant_key)})</span></td>
+      <td class="num">${fmtNum(t.project_count)}</td>
+      <td class="num">${fmtNum(t.vm_count)}</td>
+      <td class="num">${fmtNum(t.powered_on_vm_count)}</td>
+      <td class="num strong">${fmtMoney(t.total_cost, t.currency_note)}</td>
+    </tr>`
+    )
+    .join("");
 }
 
 function renderAdminProjectTable(projects) {
@@ -726,8 +798,7 @@ function openDrilldown(projectId) {
   pdfBtn.hidden = !isMonthMode();
   pdfBtn.dataset.projectId = projectId;
   if (isMonthMode()) pdfBtn.textContent = `PDF 결산서 다운로드 (${state.monthValue})`;
-
-  document.getElementById("admin-drilldown").scrollIntoView({ behavior: "smooth", block: "start" });
+  // [v4.2] 화면 가운데 팝업(모달)으로 뜨므로 더 이상 페이지를 스크롤할 필요가 없다.
 }
 
 /* ---------------------------- 요금 설정 모달 ---------------------------- */
@@ -1196,7 +1267,7 @@ function renderAccountTable(accounts) {
       (a) => `
     <tr>
       <td class="vm-name">${escapeHtml(a.name)} ${a.is_mock ? '<span class="uptime-pill">데모</span>' : ""}</td>
-      <td>${a.kind === "vcf_ops" ? "VCF Operations" : "Aria Operations"}</td>
+      <td>VCF Operations</td>
       <td>${escapeHtml(a.base_url)}</td>
       <td>${escapeHtml(a.username)}</td>
       <td>${syncStatusBadgeHtml(a)}</td>
@@ -1342,7 +1413,7 @@ async function openInventoryPanel(accountId) {
     document.getElementById("inventory-panel-title").textContent = `${inv.integration_account_name} — 인벤토리 (VM ${inv.vm_count}대)`;
     renderInventoryTree(inv);
     document.getElementById("inventory-panel").hidden = false;
-    document.getElementById("inventory-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    // [v4.2] 화면 가운데 팝업(모달)으로 뜨므로 더 이상 페이지를 스크롤할 필요가 없다.
   } catch (err) {
     showToast(err.message, "error");
   }

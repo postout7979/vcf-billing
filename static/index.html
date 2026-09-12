@@ -20,14 +20,6 @@
     </div>
 
     <form id="login-form">
-      <label class="field-label" for="login-email">데모 계정 선택</label>
-      <select id="login-select">
-        <option value="">직접 입력...</option>
-        <option value="admin|admin1!2@3#">admin — 플랫폼 관리자 (전체 테넌트)</option>
-        <option value="nova-lead@corp.com|demo1234!">nova-lead@corp.com — Nova 사업부 담당자</option>
-        <option value="orion-lead@corp.com|demo1234!">orion-lead@corp.com — Orion 사업부 담당자</option>
-      </select>
-
       <label class="field-label" for="login-email">아이디 (이메일)</label>
       <input id="login-email" type="text" placeholder="you@corp.com 또는 admin" required />
 
@@ -39,9 +31,8 @@
     </form>
 
     <p class="login-note">
-      데모 계정을 선택하면 아이디/비밀번호가 자동으로 채워집니다. 관리자는 "계정 연동" 메뉴에서
-      VCF Operations/Aria Operations 연동 계정을 독립적으로 등록하고, "테넌트 관리" 메뉴에서
-      테넌트/프로젝트/사용자 계정을 구성할 수 있습니다.
+      관리자는 "계정 연동" 메뉴에서 VCF Operations 연동 계정을 독립적으로 등록하고,
+      "테넌트 관리" 메뉴에서 테넌트/프로젝트/사용자 계정을 구성할 수 있습니다.
     </p>
   </div>
 </section>
@@ -55,6 +46,7 @@
       <span id="role-badge" class="badge">-</span>
     </div>
     <div class="topbar-right">
+      <button id="refresh-btn" class="btn btn-ghost btn-sm" title="최신 데이터로 새로고침">⟳ 새로고침</button>
       <select id="admin-tenant-filter" class="period-select" hidden>
         <option value="">전체 테넌트 (교차 확인)</option>
       </select>
@@ -66,6 +58,7 @@
       </select>
       <input id="month-select" class="period-select" type="month" hidden />
       <span id="user-email" class="topbar-user muted"></span>
+      <button id="change-password-btn" class="btn btn-ghost btn-sm" hidden>비밀번호 변경</button>
       <button id="logout-btn" class="btn btn-ghost btn-sm">로그아웃</button>
     </div>
   </header>
@@ -122,40 +115,6 @@
         </table>
       </div>
     </section>
-
-    <!-- 프로젝트 드릴다운 (VM별 상세) -->
-    <section class="card table-card" id="user-drilldown" hidden>
-      <div class="card-head drilldown-head">
-        <div>
-          <h3 id="user-drilldown-title">-</h3>
-          <p class="muted">VM별 사용량 및 요금 상세</p>
-        </div>
-        <div class="drilldown-actions">
-          <button class="btn btn-ghost btn-sm" id="user-drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
-          <button class="btn btn-ghost btn-sm" id="user-drilldown-close">닫기 ✕</button>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>VM</th>
-              <th>vCPU</th>
-              <th>vMEM (GB)</th>
-              <th>vDisk (GB)</th>
-              <th>Power-On 시간</th>
-              <th>가동률</th>
-              <th>vCPU 요금</th>
-              <th>vMEM 요금</th>
-              <th>vDisk 요금</th>
-              <th>합계</th>
-              <th>평균 사용률</th>
-            </tr>
-          </thead>
-          <tbody id="user-drilldown-vm-table-body"></tbody>
-        </table>
-      </div>
-    </section>
   </main>
 
   <!-- ============ 관리자 대시보드 ============ -->
@@ -194,6 +153,28 @@
         </div>
       </section>
 
+      <!-- 테넌트별 현황 ("전체 테넌트 교차 확인" 조회일 때만 표시) -->
+      <section class="card table-card" id="admin-tenant-summary-card" hidden>
+        <div class="card-head">
+          <h3>테넌트별 현황</h3>
+          <p class="muted">전체 테넌트 교차 확인 중 - 테넌트별 집계입니다</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>테넌트</th>
+                <th>프로젝트 수</th>
+                <th>VM 수</th>
+                <th>가동 VM</th>
+                <th>기간 요금</th>
+              </tr>
+            </thead>
+            <tbody id="admin-tenant-summary-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card table-card">
         <div class="card-head">
           <h3>프로젝트 목록</h3>
@@ -217,40 +198,6 @@
               </tr>
             </thead>
             <tbody id="admin-project-table-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- 프로젝트 드릴다운 (VM별 상세) -->
-      <section class="card table-card" id="admin-drilldown" hidden>
-        <div class="card-head drilldown-head">
-          <div>
-            <h3 id="drilldown-title">-</h3>
-            <p class="muted">VM별 사용량 및 요금 상세</p>
-          </div>
-          <div class="drilldown-actions">
-            <button class="btn btn-ghost btn-sm" id="drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
-            <button class="btn btn-ghost btn-sm" id="drilldown-close">닫기 ✕</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>VM</th>
-                <th>vCPU</th>
-                <th>vMEM (GB)</th>
-                <th>vDisk (GB)</th>
-                <th>Power-On 시간</th>
-                <th>가동률</th>
-                <th>vCPU 요금</th>
-                <th>vMEM 요금</th>
-                <th>vDisk 요금</th>
-                <th>합계</th>
-                <th>평균 사용률</th>
-              </tr>
-            </thead>
-            <tbody id="drilldown-vm-table-body"></tbody>
           </table>
         </div>
       </section>
@@ -289,7 +236,7 @@
       <div class="page-head">
         <div>
           <h2>계정 연동</h2>
-          <p class="muted">VCF Operations/Aria Operations 연동 계정을 독립적으로 등록합니다. 하나의 연동 계정 인벤토리를 여러 테넌트/프로젝트가 나눠 사용할 수 있습니다.</p>
+          <p class="muted">VCF Operations 연동 계정을 독립적으로 등록합니다. 하나의 연동 계정 인벤토리를 여러 테넌트/프로젝트가 나눠 사용할 수 있습니다.</p>
         </div>
         <button class="btn btn-primary btn-sm" id="account-create-btn">+ 새 연동 계정</button>
       </div>
@@ -303,7 +250,7 @@
                 <th>종류</th>
                 <th>Base URL</th>
                 <th>사용자명</th>
-                <th>연동 상태</th>
+                <th>연동 상태 / 마지막 동기화</th>
                 <th>vCenter 수</th>
                 <th>VM 수</th>
                 <th></th>
@@ -311,22 +258,6 @@
             </thead>
             <tbody id="account-table-body"></tbody>
           </table>
-        </div>
-      </section>
-
-      <!-- 인벤토리 뷰어 -->
-      <section class="card table-card" id="inventory-panel" hidden>
-        <div class="card-head drilldown-head">
-          <div>
-            <h3 id="inventory-panel-title">-</h3>
-            <p class="muted">vCenter → Datacenter → Cluster/VM Folder 계층 및 VM Tag (5분 주기로 자동 수집)</p>
-          </div>
-          <button class="btn btn-ghost btn-sm" id="inventory-panel-close">닫기 ✕</button>
-        </div>
-        <div id="inventory-tree" class="inventory-tree"></div>
-        <div class="inventory-tags">
-          <h5>VM Tag</h5>
-          <div id="inventory-tag-list" class="tag-chip-list"></div>
         </div>
       </section>
     </section>
@@ -531,10 +462,8 @@
     <form id="account-form">
       <div class="field-row">
         <label class="field-label">종류</label>
-        <select id="account-kind">
-          <option value="vcf_ops">VCF Operations</option>
-          <option value="aria_ops">Aria Operations</option>
-        </select>
+        <input type="text" value="VCF Operations" disabled />
+        <input type="hidden" id="account-kind" value="vcf_ops" />
       </div>
       <div class="field-row">
         <label class="field-label">표시 이름</label>
@@ -563,7 +492,7 @@
       <p class="muted small">
         체크 해제 시 자체서명 인증서 등 신뢰할 수 없는 인증서도 그대로 허용하는
         비보안(insecure) 연결로 접속합니다. 사내에서 자체서명 인증서를 쓰는
-        VCF Operations/Aria Operations 어플라이언스라면 체크를 해제하세요.
+        VCF Operations 어플라이언스라면 체크를 해제하세요.
       </p>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="account-cancel-btn">취소</button>
@@ -571,6 +500,125 @@
       </div>
       <p id="account-form-error" class="form-error" hidden></p>
     </form>
+  </div>
+</div>
+
+<!-- ============ 비밀번호 변경 모달 (로그인 계정 본인) ============ -->
+<div id="password-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>비밀번호 변경</h3>
+      <button class="btn btn-ghost btn-sm" id="password-modal-close">✕</button>
+    </div>
+    <form id="password-form">
+      <div class="field-row">
+        <label class="field-label" for="password-current">현재 비밀번호</label>
+        <input id="password-current" type="password" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="password-new">새 비밀번호</label>
+        <input id="password-new" type="password" required minlength="4" />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="password-new-confirm">새 비밀번호 확인</label>
+        <input id="password-new-confirm" type="password" required minlength="4" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="password-cancel-btn">취소</button>
+        <button type="submit" class="btn btn-primary">변경</button>
+      </div>
+      <p id="password-form-error" class="form-error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 프로젝트 드릴다운 팝업 (일반 사용자) ============ -->
+<div id="user-drilldown" class="modal-backdrop" hidden>
+  <div class="modal modal-xxl card">
+    <div class="drilldown-head">
+      <div>
+        <h3 id="user-drilldown-title">-</h3>
+        <p class="muted">VM별 사용량 및 요금 상세</p>
+      </div>
+      <div class="drilldown-actions">
+        <button class="btn btn-ghost btn-sm" id="user-drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
+        <button class="btn btn-ghost btn-sm" id="user-drilldown-close">닫기 ✕</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>VM</th>
+            <th>vCPU</th>
+            <th>vMEM (GB)</th>
+            <th>vDisk (GB)</th>
+            <th>Power-On 시간</th>
+            <th>가동률</th>
+            <th>vCPU 요금</th>
+            <th>vMEM 요금</th>
+            <th>vDisk 요금</th>
+            <th>합계</th>
+            <th>평균 사용률</th>
+          </tr>
+        </thead>
+        <tbody id="user-drilldown-vm-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 프로젝트 드릴다운 팝업 (관리자) ============ -->
+<div id="admin-drilldown" class="modal-backdrop" hidden>
+  <div class="modal modal-xxl card">
+    <div class="drilldown-head">
+      <div>
+        <h3 id="drilldown-title">-</h3>
+        <p class="muted">VM별 사용량 및 요금 상세</p>
+      </div>
+      <div class="drilldown-actions">
+        <button class="btn btn-ghost btn-sm" id="drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
+        <button class="btn btn-ghost btn-sm" id="drilldown-close">닫기 ✕</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>VM</th>
+            <th>vCPU</th>
+            <th>vMEM (GB)</th>
+            <th>vDisk (GB)</th>
+            <th>Power-On 시간</th>
+            <th>가동률</th>
+            <th>vCPU 요금</th>
+            <th>vMEM 요금</th>
+            <th>vDisk 요금</th>
+            <th>합계</th>
+            <th>평균 사용률</th>
+          </tr>
+        </thead>
+        <tbody id="drilldown-vm-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 인벤토리 뷰어 팝업 ============ -->
+<div id="inventory-panel" class="modal-backdrop" hidden>
+  <div class="modal modal-xxl card">
+    <div class="drilldown-head">
+      <div>
+        <h3 id="inventory-panel-title">-</h3>
+        <p class="muted">vCenter → Datacenter → Cluster/VM Folder 계층 및 VM Tag (5분 주기로 자동 수집)</p>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="inventory-panel-close">닫기 ✕</button>
+    </div>
+    <div id="inventory-tree" class="inventory-tree"></div>
+    <div class="inventory-tags">
+      <h5>VM Tag</h5>
+      <div id="inventory-tag-list" class="tag-chip-list"></div>
+    </div>
   </div>
 </div>
 

@@ -11,7 +11,7 @@
 전제: 우분투 24.04 LTS 이상, sudo 가능한 계정, 신규 서버.
 
 > **참고**: 이 가이드 작성 이후 애플리케이션이 한 차례 더 개편되었습니다 (v3). 관리자 화면이
-> 개요/계정 연동/테넌트 관리 3개 메뉴로 나뉘었고, VCF Operations(Aria Operations) 연동 계정은
+> 개요/계정 연동/테넌트 관리 3개 메뉴로 나뉘었고, VCF Operations 연동 계정은
 > 테넌트에 종속되지 않는 **독립된 전역 엔티티**로 "계정 연동" 메뉴에서 등록·관리합니다. 연동
 > 계정 하나로 수집한 vCenter→Datacenter→Cluster/VM Folder/VM 전체 인벤토리(및 VM Tag)를
 > 바탕으로, 테넌트 하위 프로젝트마다 Cluster/VM Folder/VM Tag를 **다중 선택·조합**해 매칭
@@ -98,7 +98,7 @@ cp .env.example .env
 nano .env
 ```
 
-VCF Operations/Aria Operations 연동 자격증명은 `.env`에 넣지 않습니다. 연동 계정은
+VCF Operations 연동 자격증명은 `.env`에 넣지 않습니다. 연동 계정은
 서버 기동 후 관리자 화면의 **"계정 연동"** 메뉴에서 등록하는 전역(global) 엔티티이며,
 테넌트에 종속되지 않습니다 — 계정 하나를 등록해두면 여러 테넌트/프로젝트가 그 인벤토리를
 공유해서 씁니다 (아래 10번 및 README "계정 연동" 참고). `.env`에서 바꿔야 하는 항목은
@@ -187,7 +187,7 @@ sudo ufw allow 'Nginx Full'
 
 **운영 환경이라면 최초 로그인 직후 admin 비밀번호부터 바꾸세요** (현재 UI에는
 비밀번호 변경 화면이 없어 `PUT /api/admin/users/{id}/password` API로 재설정해야
-합니다). 실 VCF Operations/Aria Operations 환경과 연동하려면 admin으로 로그인한 뒤:
+합니다). 실 VCF Operations 환경과 연동하려면 admin으로 로그인한 뒤:
 
 1. **"계정 연동"** 메뉴에서 연동 계정을 새로 등록 (URL/계정/비밀번호 입력 — 등록 즉시
    백그라운드 수집기가 5분 주기로 인벤토리를 가져오기 시작합니다).

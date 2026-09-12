@@ -258,7 +258,7 @@ docker compose up -d --build migrate api collector
   `docker/*/Dockerfile` at that mirror instead.
 - **Integration sync fails with `[Errno -3] Temporary failure in name
   resolution`**: this is a DNS lookup failure for your VCF
-  Operations/Aria Operations hostname, happening *inside* the `api`/
+  Operations hostname, happening *inside* the `api`/
   `collector` containers rather than on the host. It's almost always caused
   by Ubuntu's systemd-resolved: the host's `/etc/resolv.conf` points at the
   stub resolver `127.0.0.53`, which only works on the host itself — a
@@ -308,6 +308,6 @@ docker compose up -d --build migrate api collector
 ## Where to go next
 
 - README.md — feature reference, admin UI walkthrough, real VCF
-  Operations/Aria Operations integration guide, known limitations.
+  Operations integration guide, known limitations.
 - `legacy/legacy-ubuntu-deploy.md` — the pre-v4.0 venv + systemd install
   guide, kept as a fallback for environments where Docker isn't an option.

@@ -1,11 +1,11 @@
 # VCF Billing Portal
 
-VCF Operations(Aria Operations)에서 수집한 VM 리소스 사용량을 기반으로,
+VCF Operations에서 수집한 VM 리소스 사용량을 기반으로,
 퍼블릭 클라우드 사업자와 유사한 형태의 **사설 클라우드 과금 포탈**을 제공하는
 데모 애플리케이션입니다. 실제 계산서 발행은 범위에서 제외하고, 리소스 사용량과
 예상 요금을 조회하는 UI에 집중합니다.
 
-- **연동 계정(IntegrationAccount)**: VCF Operations/Aria Operations 접속 정보를
+- **연동 계정(IntegrationAccount)**: VCF Operations 접속 정보를
   **독립적으로/전역으로** 등록합니다(특정 Tenant에 종속되지 않음). 하나의 연동
   계정이 수집한 vCenter → Datacenter → Cluster/VM Folder → VM 인벤토리(+VM Tag)를
   여러 Tenant/Project가 나눠서 사용할 수 있습니다.
@@ -24,7 +24,7 @@ VCF Operations(Aria Operations)에서 수집한 VM 리소스 사용량을 기반
 ## 기술 스택 선택 이유
 
 - **백엔드: Python 3.11+ + FastAPI**
-  VCF Operations(Aria Operations)는 REST/JSON API를 제공하며, VMware 진영의
+  VCF Operations는 REST/JSON API를 제공하며, VMware 진영의
   공식 SDK(pyVmomi, vSphere Automation SDK 등)도 Python 우선으로 제공됩니다.
   FastAPI는 Pydantic 기반 타입 검증과 자동 OpenAPI 문서(`/docs`)를 제공해
   과금 API처럼 정확성이 중요한 서비스에 적합합니다.
@@ -45,7 +45,7 @@ VCF Operations(Aria Operations)에서 수집한 VM 리소스 사용량을 기반
   `bcrypt`로 단방향 해시하여 저장하고(`app/auth.py`), 로그인 성공 시
   JWT 액세스 토큰을 발급합니다.
 - **연동 계정 자격증명 암호화: Fernet (cryptography)**
-  연동 계정의 VCF Operations/Aria Operations 접속 비밀번호는 DB에 평문으로
+  연동 계정의 VCF Operations 접속 비밀번호는 DB에 평문으로
   저장하지 않고, 앱의 `SECRET_KEY`에서 파생한 키로 Fernet 대칭 암호화하여
   저장합니다(`app/security/crypto.py`). API 응답에도 절대 포함되지 않습니다.
 
@@ -137,14 +137,14 @@ billing 엔진/수집기/API는 이 인터페이스에만 의존합니다. 연�
 접속정보로 실 `VCFOpsRestClient`(`app/integrations/vcf_ops_client.py`)가
 생성됩니다.
 
-`VCFOpsRestClient`는 더 이상 스텁이 아니라 VCF Operations/Aria Operations
+`VCFOpsRestClient`는 더 이상 스텁이 아니라 VCF Operations
 표준 Suite API로 실제로 동작합니다 — 인증 토큰 발급/자동 재발급(401 시
 재시도), VM 리소스 목록 페이징 조회, `relationships`(상위 관계) API를 타고
 올라가며 vCenter → Datacenter → Cluster/VM Folder 계층을 구성(중첩 폴더의
 전체 경로까지 조합), vCPU/vMEM/vDisk 스펙 및 VM Tag(프로퍼티 기반) 조회,
 TLS 인증서 미검증(자체서명 인증서) 연결까지 구현되어 있습니다. 다만
 리소스 종류 이름과 프로퍼티 키(`vcf_ops_client.py` 상단의 `RESOURCE_KIND_*`/
-`PROP_*`/`TAG_PROPERTY_PREFIX` 상수)는 VCF Operations/Aria Operations의
+`PROP_*`/`TAG_PROPERTY_PREFIX` 상수)는 VCF Operations의
 버전·관리팩 설정에 따라 다를 수 있어, 실 환경에 붙인 뒤 `scripts/
 inspect_integration_account.py`로 실제 값을 확인하고 필요시 상수만 조정하면
 됩니다 (아래 "실 VCF Operations 환경 연동 방법" 참고).
@@ -175,10 +175,10 @@ VM별 상세 내역(드릴다운)을 볼 수 있습니다.
 
 ### 2. 계정 연동
 
-VCF Operations/Aria Operations 연동 계정을 **테넌트와 무관하게 독립적으로**
+VCF Operations 연동 계정을 **테넌트와 무관하게 독립적으로**
 등록/수정/삭제합니다.
 
-- **"+ 새 연동 계정"** — 종류(VCF Operations/Aria Operations), 표시 이름,
+- **"+ 새 연동 계정"** — 종류(VCF Operations), 표시 이름,
   Base URL, 사용자명/비밀번호, authSource, TLS 검증 여부를 입력해 등록합니다.
   비밀번호는 항상 암호화되어 저장되며, 보안상 기존 값을 화면에 다시 보여주지
   않으므로 수정 시 비워두면 기존 비밀번호가 유지됩니다. **등록(또는 URL/계정/
@@ -260,7 +260,7 @@ Project는 Cluster / VM Folder / VM Tag 세 종류의 매칭 기준을 **동시�
 **id가 가장 작은(=먼저 생성된) Project**가 우선합니다. 어떤 기준에도
 해당하지 않는 VM은 "미배정"(project_id = null) 상태로 남습니다.
 
-> 실 VCF Operations/Aria Operations 연동 시 vCenter/Datacenter/Cluster/VM
+> 실 VCF Operations 연동 시 vCenter/Datacenter/Cluster/VM
 > Folder 계층과 VM Tag를 가져오는 정확한 리소스 종류 이름/프로퍼티 키는
 > 환경별로 다를 수 있어, `app/integrations/vcf_ops_client.py` 상단의
 > `RESOURCE_KIND_*`/`PROP_*`/`TAG_PROPERTY_PREFIX` 상수로 분리해 두었습니다.
@@ -404,13 +404,13 @@ Docker 자체를 쓸 수 없는 서버에 배포해야 한다면 `legacy/legacy-
 | nova-lead@corp.com | demo1234! | 일반 사용자 | Nova 사업부 (Cluster 기준 프로젝트 + Tag 기준 프로젝트) |
 | orion-lead@corp.com | demo1234! | 일반 사용자 | Orion 사업부 (VM Folder 기준 프로젝트 + Cluster·Tag 복합 기준 프로젝트) |
 
-로그인 화면 드롭다운에서 계정을 선택하면 아이디/비밀번호가 자동으로
-채워집니다.
+[v4.2] 로그인 화면의 데모 계정 드롭다운은 제거되었습니다 - 위 표의 아이디/
+비밀번호를 아이디/비밀번호 입력란에 직접 입력해서 로그인하세요.
 
 ## 실 VCF Operations 환경 연동 방법
 
 1. 관리자로 로그인 후 **"계정 연동"** 메뉴에서 "+ 새 연동 계정"으로 VCF
-   Operations/Aria Operations의 Base URL(예: `https://vrops.corp.local`),
+   Operations의 Base URL(예: `https://vrops.corp.local`),
    서비스 계정 사용자명/비밀번호, authSource(로컬 계정이면 `local`, AD 연동
    계정이면 해당 인증소스 이름)를 입력합니다. 사내에서 자체서명 인증서를
    쓰는 어플라이언스라면 **"TLS 인증서 검증" 체크를 해제**하세요 — 인증서
@@ -431,7 +431,7 @@ Docker 자체를 쓸 수 없는 서버에 배포해야 한다면 `legacy/legacy-
      대규모 환경에서 더 빠르고, "PARENT 방향에서만 실패하던" 환경 문제도
      함께 해결됩니다. vCenter는 더 이상 relationships로 찾지 않고(일부
      환경은 vCenter를 어댑터 접속 정보로만 노출), 항상 연동 계정의 Base
-     URL에서 유도한 값을 그대로 씁니다 — 여러 vCenter를 한 Aria Operations
+     URL에서 유도한 값을 그대로 씁니다 — 여러 vCenter를 한 VCF Operations
      인스턴스가 관리한다면 vCenter/스코프별로 연동 계정을 나눠 등록하세요.
    - "VM N대 전부 Datacenter/Cluster/HostSystem 하위 관계(relationships)
      자체를 하나도 받지 못했습니다" 메시지라면, 이름(`RESOURCE_KIND_*`)
@@ -554,7 +554,7 @@ Docker 자체를 쓸 수 없는 서버에 배포해야 한다면 `legacy/legacy-
   실제 태그 이름으로 오인하지 않고 무시합니다. (2) vCenter를 여전히
   기본값은 계정의 Base URL에서 유도하되, VM 자신의 "Parent vCenter"
   프로퍼티(`summary|parentVcenter`)가 있으면 그 값을 우선 사용합니다 -
-  Aria Operations 한 인스턴스가 여러 vCenter를 관리하는 환경에서 더
+  VCF Operations 한 인스턴스가 여러 vCenter를 관리하는 환경에서 더
   정확합니다.
   [v3.8] 사용자가 제공한 `sample.json`(실 환경에서 `inspect_vm_metrics.py`로
   수집)의 프로퍼티 값을 실측 대조한 결과, vCPU 수/vDisk 용량/전원 상태

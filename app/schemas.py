@@ -12,12 +12,24 @@ class LoginRequest(BaseModel):
 
 
 class UserOut(BaseModel):
+    id: int
     email: str
     display_name: str
     role: str
     tenant_id: int | None = None
     tenant_key: str | None = None
     tenant_name: str | None = None
+
+
+class SelfPasswordUpdate(BaseModel):
+    """[v4.2] 로그인한 본인이 자기 비밀번호를 바꿀 때 쓴다 (관리자 메뉴의 "비밀번호 변경").
+
+    관리자 전용 PUT /api/admin/users/{id}/password 와 달리, 현재 비밀번호 확인을
+    거친다 - 세션(토큰)을 탈취당한 것만으로는 비밀번호를 바꿀 수 없게 하기 위함.
+    """
+
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=4)
 
 
 class TokenResponse(BaseModel):
@@ -82,7 +94,7 @@ class TenantOut(BaseModel):
 
 
 class IntegrationAccountCreate(BaseModel):
-    kind: str = Field(description='"vcf_ops" 또는 "aria_ops"')
+    kind: str = Field(default="vcf_ops", description='"vcf_ops" (현재 유일하게 지원하는 값)')
     name: str = Field(min_length=1, max_length=128, description="관리자 화면에 표시할 연동 계정 이름")
     base_url: str = Field(min_length=1)
     username: str = Field(min_length=1)
@@ -317,6 +329,23 @@ class ProjectUsageOut(BaseModel):
     daily: list[DailyCostOut]
 
 
+class TenantSummaryOut(BaseModel):
+    """[v4.2] "전체 테넌트 (교차 확인)" 화면에서 프로젝트 목록 위에 표시하는 테넌트별 집계.
+
+    tenant_id로 필터링하지 않은(전체 교차 확인) 조회에서만 채워진다 - 특정 테넌트를
+    필터링한 조회는 어차피 테넌트가 하나뿐이라 헤더(tenant_name)만으로 충분하다.
+    """
+
+    tenant_id: int
+    tenant_key: str
+    tenant_name: str
+    project_count: int
+    vm_count: int
+    powered_on_vm_count: int
+    total_cost: float
+    currency_note: str
+
+
 class AdminOverviewOut(BaseModel):
     period_start: dt.datetime
     period_end: dt.datetime
@@ -328,3 +357,4 @@ class AdminOverviewOut(BaseModel):
     total_cost: float
     currency_note: str
     projects: list[ProjectUsageOut]
+    tenant_summaries: list[TenantSummaryOut] = []

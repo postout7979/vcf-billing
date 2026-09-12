@@ -335,6 +335,9 @@ td.vm-name { font-weight: 600; }
 .status-badge.status-ok { background: var(--teal-tint); color: #0d7d70; }
 .status-badge.status-error { background: var(--danger-tint); color: var(--danger); }
 .status-badge.status-pending { background: var(--amber-tint); color: var(--amber); }
+/* [v4.2] 연동 상태 배지 아래에 마지막 동기화 시각/VM 수를 텍스트로 항상 표시한다
+   (기존에는 배지에 마우스를 올려야만 보이는 title 툴팁 안에만 있었다). */
+.sync-time { margin-top: 4px; white-space: normal; }
 
 /* ---------- 모달 ---------- */
 .modal-backdrop {
@@ -351,6 +354,8 @@ td.vm-name { font-weight: 600; }
 .modal { width: 420px; max-width: 100%; padding: 20px 22px 22px; box-shadow: var(--shadow-lg); margin: auto; max-height: calc(100vh - 40px); overflow-y: auto; }
 .modal-wide { width: 640px; }
 .modal-xl { width: 960px; }
+/* [v4.2] 프로젝트 드릴다운/인벤토리 뷰어 팝업 - 화면 가로 폭의 약 80%를 채운다. */
+.modal-xxl { width: 80vw; max-width: 1400px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .field-row { display: flex; flex-direction: column; }
 .field-row-checkbox { flex-direction: row; align-items: center; gap: 8px; }

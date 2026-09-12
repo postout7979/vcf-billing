@@ -58,10 +58,17 @@ class UserRole(str, enum.Enum):
 
 
 class IntegrationKind(str, enum.Enum):
-    """연동 제품 종류 (API 형태는 사실상 동일, 표시용 구분)."""
+    """연동 제품 종류.
+
+    [v4.2] Aria Operations는 선택지에서 제거했다(관리자 화면 요청) - VCF Operations
+    하나만 지원한다. 기존에 kind="aria_ops"로 저장된 행이 있는 상태에서 업그레이드하면
+    SQLAlchemy Enum이 그 값을 더 이상 유효한 멤버로 인식하지 못해 해당 계정을 읽을 때
+    오류가 난다 - 업그레이드 전에 그런 계정이 있다면 DB에서 직접
+    `UPDATE integration_accounts SET kind='vcf_ops' WHERE kind='aria_ops'`로 정리하세요
+    (API 형태 자체는 두 제품이 동일해 실제 동작에는 차이가 없다).
+    """
 
     VCF_OPS = "vcf_ops"
-    ARIA_OPS = "aria_ops"
 
 
 # ---------------------------------------------------------------------------

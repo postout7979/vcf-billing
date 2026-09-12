@@ -55,6 +55,7 @@ from app.schemas import (
     TenantCreate,
     TenantDetailOut,
     TenantOut,
+    TenantSummaryOut,
     TenantUpdate,
     UserAdminOut,
     UserCreate,
@@ -111,6 +112,50 @@ def overview(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "테넌트를 찾을 수 없습니다")
         tenant_name = tenant.name
 
+    # [v4.2] "전체 테넌트 (교차 확인)" 화면에서 프로젝트 목록 위에 테넌트별 집계를
+    # 보여주기 위한 그룹핑. 특정 테넌트로 필터링한 조회(tenant_id 지정)는 테넌트가
+    # 하나뿐이라 만들 필요가 없다 - 항상 빈 리스트를 반환한다.
+    tenant_summaries: list[TenantSummaryOut] = []
+    if tenant_id is None:
+        order: list[int] = []
+        by_tenant: dict[int, dict] = {}
+        for p in project_schemas:
+            agg = by_tenant.get(p.tenant_id)
+            if agg is None:
+                agg = {
+                    "tenant_key": p.tenant_key,
+                    "tenant_name": p.tenant_name,
+                    "project_count": 0,
+                    "vm_count": 0,
+                    "powered_on_vm_count": 0,
+                    "total_cost": 0.0,
+                    "currencies": set(),
+                }
+                by_tenant[p.tenant_id] = agg
+                order.append(p.tenant_id)
+            agg["project_count"] += 1
+            agg["vm_count"] += p.vm_count
+            agg["powered_on_vm_count"] += p.powered_on_vm_count
+            agg["total_cost"] += p.total_cost
+            agg["currencies"].add(p.currency)
+
+        for tid in order:
+            agg = by_tenant[tid]
+            currency_note = next(iter(agg["currencies"])) if len(agg["currencies"]) == 1 else "혼합"
+            tenant_summaries.append(
+                TenantSummaryOut(
+                    tenant_id=tid,
+                    tenant_key=agg["tenant_key"],
+                    tenant_name=agg["tenant_name"],
+                    project_count=agg["project_count"],
+                    vm_count=agg["vm_count"],
+                    powered_on_vm_count=agg["powered_on_vm_count"],
+                    total_cost=round(agg["total_cost"], 2),
+                    currency_note=currency_note,
+                )
+            )
+        tenant_summaries.sort(key=lambda t: t.tenant_name)
+
     return AdminOverviewOut(
         period_start=s,
         period_end=e,
@@ -122,6 +167,7 @@ def overview(
         total_cost=round(sum(p.total_cost for p in project_schemas), 2),
         currency_note=currency_note,
         projects=project_schemas,
+        tenant_summaries=tenant_summaries,
     )
 
 
@@ -304,7 +350,7 @@ def create_integration_account(
     try:
         kind = IntegrationKind(payload.kind)
     except ValueError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, 'kind는 "vcf_ops" 또는 "aria_ops"여야 합니다') from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, 'kind는 "vcf_ops"여야 합니다') from exc
 
     if db.query(IntegrationAccount).filter_by(name=payload.name).one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 사용 중인 연동 계정 이름입니다")
