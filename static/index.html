@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VCF Billing Portal</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+
+<!-- ============ 로그인 화면 ============ -->
+<section id="view-login" class="view view-center">
+  <div class="login-card card">
+    <div class="login-brand">
+      <div class="brand-mark">VCF</div>
+      <div>
+        <h1>Billing Portal</h1>
+        <p class="muted">VCF Operations 리소스 사용량 기반 요금 조회</p>
+      </div>
+    </div>
+
+    <form id="login-form">
+      <label class="field-label" for="login-email">데모 계정 선택</label>
+      <select id="login-select">
+        <option value="">직접 입력...</option>
+        <option value="admin|admin1!2@3#">admin — 플랫폼 관리자 (전체 테넌트)</option>
+        <option value="nova-lead@corp.com|demo1234!">nova-lead@corp.com — Nova 사업부 담당자</option>
+        <option value="orion-lead@corp.com|demo1234!">orion-lead@corp.com — Orion 사업부 담당자</option>
+      </select>
+
+      <label class="field-label" for="login-email">아이디 (이메일)</label>
+      <input id="login-email" type="text" placeholder="you@corp.com 또는 admin" required />
+
+      <label class="field-label" for="login-password">비밀번호</label>
+      <input id="login-password" type="password" required />
+
+      <button type="submit" class="btn btn-primary btn-block">로그인</button>
+      <p id="login-error" class="form-error" hidden></p>
+    </form>
+
+    <p class="login-note">
+      데모 계정을 선택하면 아이디/비밀번호가 자동으로 채워집니다. 관리자는 "계정 연동" 메뉴에서
+      VCF Operations/Aria Operations 연동 계정을 독립적으로 등록하고, "테넌트 관리" 메뉴에서
+      테넌트/프로젝트/사용자 계정을 구성할 수 있습니다.
+    </p>
+  </div>
+</section>
+
+<!-- ============ 공통 상단 바 (로그인 후) ============ -->
+<div id="app-shell" hidden>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand-mark small">VCF</div>
+      <span class="topbar-title">Billing Portal</span>
+      <span id="role-badge" class="badge">-</span>
+    </div>
+    <div class="topbar-right">
+      <select id="admin-tenant-filter" class="period-select" hidden>
+        <option value="">전체 테넌트 (교차 확인)</option>
+      </select>
+      <select id="period-select" class="period-select">
+        <option value="7d">최근 7일</option>
+        <option value="30d" selected>최근 30일</option>
+        <option value="mtd">이번 달(1일~오늘)</option>
+        <option value="month">특정 월 조회...</option>
+      </select>
+      <input id="month-select" class="period-select" type="month" hidden />
+      <span id="user-email" class="topbar-user muted"></span>
+      <button id="logout-btn" class="btn btn-ghost btn-sm">로그아웃</button>
+    </div>
+  </header>
+
+  <!-- ============ 일반 사용자 대시보드 (배정된 테넌트 범위) ============ -->
+  <main id="view-user" class="view" hidden>
+    <div class="page-head">
+      <div>
+        <h2 id="user-tenant-name">-</h2>
+        <p class="muted" id="user-period-label">-</p>
+      </div>
+    </div>
+
+    <section class="kpi-grid" id="user-kpis"></section>
+
+    <section class="panel-grid">
+      <div class="card chart-card">
+        <div class="card-head">
+          <h3>프로젝트별 요금 비교</h3>
+          <p class="muted" id="user-currency-note">-</p>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="user-project-chart"></canvas></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-head">
+          <h3>일별 요금 추이</h3>
+          <p class="muted">배정된 테넌트 전체 합산</p>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="user-daily-chart"></canvas></div>
+      </div>
+    </section>
+
+    <section class="card table-card">
+      <div class="card-head">
+        <h3>프로젝트 목록</h3>
+        <p class="muted">행을 클릭하면 VM별 상세 내역을 확인할 수 있습니다</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>프로젝트</th>
+              <th>매칭 기준</th>
+              <th>VM 수</th>
+              <th>가동 VM</th>
+              <th>vCPU</th>
+              <th>vMEM (GB)</th>
+              <th>vDisk (GB)</th>
+              <th>기간 요금</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="user-project-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 프로젝트 드릴다운 (VM별 상세) -->
+    <section class="card table-card" id="user-drilldown" hidden>
+      <div class="card-head drilldown-head">
+        <div>
+          <h3 id="user-drilldown-title">-</h3>
+          <p class="muted">VM별 사용량 및 요금 상세</p>
+        </div>
+        <div class="drilldown-actions">
+          <button class="btn btn-ghost btn-sm" id="user-drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
+          <button class="btn btn-ghost btn-sm" id="user-drilldown-close">닫기 ✕</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>VM</th>
+              <th>vCPU</th>
+              <th>vMEM (GB)</th>
+              <th>vDisk (GB)</th>
+              <th>Power-On 시간</th>
+              <th>가동률</th>
+              <th>vCPU 요금</th>
+              <th>vMEM 요금</th>
+              <th>vDisk 요금</th>
+              <th>합계</th>
+              <th>평균 사용률</th>
+            </tr>
+          </thead>
+          <tbody id="user-drilldown-vm-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ 관리자 대시보드 ============ -->
+  <main id="view-admin" class="view" hidden>
+    <nav class="admin-nav">
+      <button class="admin-nav-btn active" data-admin-page="overview">개요</button>
+      <button class="admin-nav-btn" data-admin-page="tenants">테넌트 관리</button>
+      <button class="admin-nav-btn" data-admin-page="integrations">계정 연동</button>
+    </nav>
+
+    <!-- -------- 개요 -------- -->
+    <section id="admin-page-overview" class="admin-page">
+      <div class="page-head">
+        <div>
+          <h2 id="admin-overview-title">전체 프로젝트 현황</h2>
+          <p class="muted" id="admin-period-label">-</p>
+        </div>
+      </div>
+
+      <section class="kpi-grid" id="admin-kpis"></section>
+
+      <section class="panel-grid">
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>프로젝트별 요금 비교</h3>
+            <p class="muted" id="admin-currency-note">-</p>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="admin-project-chart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>전체 일별 요금 추이</h3>
+            <p class="muted">전체 프로젝트 합산</p>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="admin-daily-chart"></canvas></div>
+        </div>
+      </section>
+
+      <section class="card table-card">
+        <div class="card-head">
+          <h3>프로젝트 목록</h3>
+          <p class="muted">행을 클릭하면 VM별 상세 내역을 확인할 수 있습니다</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>프로젝트</th>
+                <th>테넌트</th>
+                <th>매칭 기준</th>
+                <th>VM 수</th>
+                <th>가동 VM</th>
+                <th>vCPU</th>
+                <th>vMEM (GB)</th>
+                <th>vDisk (GB)</th>
+                <th>단가 (vCPU/vMEM/vDisk, 시간당)</th>
+                <th>기간 요금</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="admin-project-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 프로젝트 드릴다운 (VM별 상세) -->
+      <section class="card table-card" id="admin-drilldown" hidden>
+        <div class="card-head drilldown-head">
+          <div>
+            <h3 id="drilldown-title">-</h3>
+            <p class="muted">VM별 사용량 및 요금 상세</p>
+          </div>
+          <div class="drilldown-actions">
+            <button class="btn btn-ghost btn-sm" id="drilldown-pdf-btn" hidden>PDF 결산서 다운로드</button>
+            <button class="btn btn-ghost btn-sm" id="drilldown-close">닫기 ✕</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>VM</th>
+                <th>vCPU</th>
+                <th>vMEM (GB)</th>
+                <th>vDisk (GB)</th>
+                <th>Power-On 시간</th>
+                <th>가동률</th>
+                <th>vCPU 요금</th>
+                <th>vMEM 요금</th>
+                <th>vDisk 요금</th>
+                <th>합계</th>
+                <th>평균 사용률</th>
+              </tr>
+            </thead>
+            <tbody id="drilldown-vm-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- -------- 테넌트 관리 -------- -->
+    <section id="admin-page-tenants" class="admin-page" hidden>
+      <div class="page-head">
+        <div>
+          <h2>테넌트 관리</h2>
+          <p class="muted">테넌트 생성/수정/삭제, 하위 프로젝트(Cluster/VM Folder/VM Tag 매칭 기준), 사용자 배정</p>
+        </div>
+        <button class="btn btn-primary btn-sm" id="tenant-create-btn">+ 새 테넌트</button>
+      </div>
+
+      <section class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>테넌트</th>
+                <th>Key</th>
+                <th>프로젝트 수</th>
+                <th>사용자 수</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tenant-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- -------- 계정 연동 -------- -->
+    <section id="admin-page-integrations" class="admin-page" hidden>
+      <div class="page-head">
+        <div>
+          <h2>계정 연동</h2>
+          <p class="muted">VCF Operations/Aria Operations 연동 계정을 독립적으로 등록합니다. 하나의 연동 계정 인벤토리를 여러 테넌트/프로젝트가 나눠 사용할 수 있습니다.</p>
+        </div>
+        <button class="btn btn-primary btn-sm" id="account-create-btn">+ 새 연동 계정</button>
+      </div>
+
+      <section class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>종류</th>
+                <th>Base URL</th>
+                <th>사용자명</th>
+                <th>연동 상태</th>
+                <th>vCenter 수</th>
+                <th>VM 수</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="account-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 인벤토리 뷰어 -->
+      <section class="card table-card" id="inventory-panel" hidden>
+        <div class="card-head drilldown-head">
+          <div>
+            <h3 id="inventory-panel-title">-</h3>
+            <p class="muted">vCenter → Datacenter → Cluster/VM Folder 계층 및 VM Tag (5분 주기로 자동 수집)</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="inventory-panel-close">닫기 ✕</button>
+        </div>
+        <div id="inventory-tree" class="inventory-tree"></div>
+        <div class="inventory-tags">
+          <h5>VM Tag</h5>
+          <div id="inventory-tag-list" class="tag-chip-list"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+
+<!-- ============ 요금 단위 설정 모달 (관리자) ============ -->
+<div id="rate-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>요금 단위 설정 — <span id="rate-modal-project">-</span></h3>
+      <button class="btn btn-ghost btn-sm" id="rate-modal-close">✕</button>
+    </div>
+    <form id="rate-form">
+      <div class="field-row">
+        <label class="field-label" for="rate-vcpu">vCPU 시간당 단가</label>
+        <input id="rate-vcpu" type="number" min="0" step="0.1" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="rate-vmem">vMEM(GB) 시간당 단가</label>
+        <input id="rate-vmem" type="number" min="0" step="0.1" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="rate-vdisk">vDisk(GB) 시간당 단가</label>
+        <input id="rate-vdisk" type="number" min="0" step="0.01" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="rate-currency">통화</label>
+        <select id="rate-currency">
+          <option value="KRW">KRW (원)</option>
+          <option value="USD">USD ($)</option>
+        </select>
+      </div>
+      <p class="muted rate-modal-note">5분 단위로 Power-On 시간을 집계해 시간당 단가를 비례 적용합니다.</p>
+      <div class="field-row field-row-checkbox">
+        <label class="field-label" for="rate-usage-weight-enabled">사용량 가중치 반영</label>
+        <input id="rate-usage-weight-enabled" type="checkbox" />
+      </div>
+      <div class="field-row" id="rate-usage-weight-floor-row">
+        <label class="field-label" for="rate-usage-weight-floor">최소 가중치(%)</label>
+        <input id="rate-usage-weight-floor" type="number" min="0" max="100" step="1" />
+      </div>
+      <p class="muted rate-modal-note">
+        켜면 실사용률(CPU/메모리 평균)에 따라 vCPU·vMEM 요금에만 가중치를 곱해 계산합니다(vDisk는 항상 스펙 기준).
+        가중치 = 최소 가중치 + (1 - 최소 가중치) × 사용률. 사용률 데이터가 없는 VM은 가중치 100%로 계산됩니다.
+      </p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="rate-cancel-btn">취소</button>
+        <button type="submit" class="btn btn-primary">저장</button>
+      </div>
+      <p id="rate-form-error" class="form-error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 테넌트 생성/수정 모달 ============ -->
+<div id="tenant-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3 id="tenant-modal-title">새 테넌트 생성</h3>
+      <button class="btn btn-ghost btn-sm" id="tenant-modal-close">✕</button>
+    </div>
+    <form id="tenant-form">
+      <div class="field-row">
+        <label class="field-label" for="tenant-key">Key</label>
+        <input id="tenant-key" type="text" placeholder="예: tenant-acme" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="tenant-name">이름</label>
+        <input id="tenant-name" type="text" placeholder="예: ACME 고객사" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="tenant-description">설명</label>
+        <input id="tenant-description" type="text" placeholder="선택 사항" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="tenant-cancel-btn">취소</button>
+        <button type="submit" class="btn btn-primary" id="tenant-form-submit-btn">생성</button>
+      </div>
+      <p id="tenant-form-error" class="form-error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 테넌트 상세 관리 모달 (관리 버튼) ============ -->
+<div id="tenant-detail-panel" class="modal-backdrop" hidden>
+  <div class="modal modal-xl card">
+    <div class="drilldown-head">
+      <div class="tenant-detail-heading">
+        <h4 id="tenant-detail-name">-</h4>
+        <button class="btn btn-ghost btn-sm" id="tenant-detail-edit-btn">테넌트 수정</button>
+        <button class="btn btn-ghost btn-sm danger" id="tenant-detail-delete-btn">테넌트 삭제</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="tenant-detail-close">닫기 ✕</button>
+    </div>
+
+    <div class="tenant-detail-grid">
+      <div class="card tenant-sub-card">
+        <div class="card-head-row">
+          <h4>프로젝트</h4>
+          <button type="button" class="btn btn-primary btn-sm" id="project-create-btn">+ 프로젝트 추가</button>
+        </div>
+        <p class="muted small">Cluster/VM Folder/VM Tag 중 여러 종류를 동시에, 각각 여러 값을 선택할 수 있습니다 (OR 매칭).</p>
+        <div class="table-wrap">
+          <table class="compact-table">
+            <thead><tr><th>이름</th><th>매칭 기준</th><th>VM 수</th><th>담당자</th><th></th></tr></thead>
+            <tbody id="tenant-project-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card tenant-sub-card">
+        <h4>사용자 계정</h4>
+        <div class="table-wrap">
+          <table class="compact-table">
+            <thead><tr><th>이메일</th><th>이름</th><th>역할</th></tr></thead>
+            <tbody id="tenant-user-table-body"></tbody>
+          </table>
+        </div>
+        <form id="tenant-user-form">
+          <div class="field-row">
+            <label class="field-label">이메일</label>
+            <input id="tenant-user-email" type="email" required />
+          </div>
+          <div class="field-row">
+            <label class="field-label">비밀번호</label>
+            <input id="tenant-user-password" type="password" required minlength="4" />
+          </div>
+          <div class="field-row">
+            <label class="field-label">표시 이름</label>
+            <input id="tenant-user-name" type="text" placeholder="선택 사항" />
+          </div>
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary btn-sm">사용자 생성</button>
+          </div>
+          <p id="tenant-user-form-error" class="form-error" hidden></p>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 프로젝트 생성/수정 모달 ============ -->
+<div id="project-edit-modal" class="modal-backdrop" hidden>
+  <div class="modal modal-wide card">
+    <div class="modal-head">
+      <h3 id="project-edit-modal-title">프로젝트 수정</h3>
+      <button class="btn btn-ghost btn-sm" id="project-edit-modal-close">✕</button>
+    </div>
+    <form id="project-edit-form">
+      <div class="field-row" id="project-edit-key-row">
+        <label class="field-label">Key</label>
+        <input id="project-edit-key-input" type="text" placeholder="예: nova-prod" />
+      </div>
+      <div class="field-row">
+        <label class="field-label">이름</label>
+        <input id="project-edit-name-input" type="text" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label">설명</label>
+        <input id="project-edit-description" type="text" placeholder="선택 사항" />
+      </div>
+      <div class="field-row">
+        <label class="field-label">담당자 이메일</label>
+        <input id="project-edit-owner-email" type="email" placeholder="선택 사항" />
+      </div>
+      <div class="field-row">
+        <label class="field-label">연동 계정 (인벤토리 조회용)</label>
+        <select id="project-edit-account-select"></select>
+      </div>
+      <p class="muted small">선택한 연동 계정의 인벤토리에서 Cluster/VM Folder/VM Tag를 다중 선택하세요. 선택된 항목 중 하나라도 일치하는 VM이 이 프로젝트에 매핑됩니다 (OR 매칭). 최소 1개는 선택해야 합니다. (수정 시 저장하면 아래에서 선택한 기준으로 전체가 교체됩니다.)</p>
+      <div id="project-edit-criteria-picker" class="criteria-picker">
+        <div class="criteria-group">
+          <h5>Cluster</h5>
+          <div id="project-edit-cluster-checks" class="check-list"></div>
+        </div>
+        <div class="criteria-group">
+          <h5>VM Folder</h5>
+          <div id="project-edit-folder-checks" class="check-list"></div>
+        </div>
+        <div class="criteria-group">
+          <h5>VM Tag</h5>
+          <div id="project-edit-tag-checks" class="check-list"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="project-edit-cancel-btn">취소</button>
+        <button type="submit" class="btn btn-primary" id="project-edit-submit-btn">저장</button>
+      </div>
+      <p id="project-edit-form-error" class="form-error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 연동 계정 생성/수정 모달 ============ -->
+<div id="account-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3 id="account-modal-title">새 연동 계정</h3>
+      <button class="btn btn-ghost btn-sm" id="account-modal-close">✕</button>
+    </div>
+    <form id="account-form">
+      <div class="field-row">
+        <label class="field-label">종류</label>
+        <select id="account-kind">
+          <option value="vcf_ops">VCF Operations</option>
+          <option value="aria_ops">Aria Operations</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label class="field-label">표시 이름</label>
+        <input id="account-name" type="text" placeholder="예: 운영 vCenter" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label">Base URL</label>
+        <input id="account-base-url" type="text" placeholder="https://vcf-ops.example.corp.local" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label">사용자명</label>
+        <input id="account-username" type="text" required />
+      </div>
+      <div class="field-row">
+        <label class="field-label" id="account-password-label">비밀번호</label>
+        <input id="account-password" type="password" />
+      </div>
+      <p class="muted small" id="account-password-hint">보안상 기존 비밀번호를 불러오지 않습니다. 수정 시 비워두면 기존 비밀번호가 유지됩니다.</p>
+      <div class="field-row">
+        <label class="field-label">authSource</label>
+        <input id="account-auth-source" type="text" value="local" />
+      </div>
+      <div class="field-row checkbox-row">
+        <label><input id="account-verify-ssl" type="checkbox" checked /> TLS 인증서 검증</label>
+      </div>
+      <p class="muted small">
+        체크 해제 시 자체서명 인증서 등 신뢰할 수 없는 인증서도 그대로 허용하는
+        비보안(insecure) 연결로 접속합니다. 사내에서 자체서명 인증서를 쓰는
+        VCF Operations/Aria Operations 어플라이언스라면 체크를 해제하세요.
+      </p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="account-cancel-btn">취소</button>
+        <button type="submit" class="btn btn-primary">저장</button>
+      </div>
+      <p id="account-form-error" class="form-error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/js/vendor/chart.umd.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

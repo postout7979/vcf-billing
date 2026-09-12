@@ -1,0 +1,35 @@
+[Unit]
+Description=VCF Billing Portal (FastAPI/Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=vcfbilling
+Group=vcfbilling
+WorkingDirectory=/opt/vcf-billing-portal
+EnvironmentFile=/opt/vcf-billing-portal/.env
+
+# Bind to localhost only -- nginx is the public-facing proxy (see
+# nginx-vcf-billing.conf). Do not expose this port directly.
+#
+# --workers 1 is intentional: the app uses a file-based SQLite database.
+# Multiple uvicorn worker processes each open their own SQLite connection
+# and can collide on writes ("database is locked") under concurrent
+# requests. Keep this at 1 unless/until the app is migrated to a
+# server-based DB (e.g. PostgreSQL via DATABASE_URL), at which point this
+# can be raised to match CPU count.
+ExecStart=/opt/vcf-billing-portal/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+Restart=on-failure
+RestartSec=5
+
+# Basic hardening. Safe to remove any of these if they cause issues on
+# your distro/kernel version.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/vcf-billing-portal/data
+
+[Install]
+WantedBy=multi-user.target
