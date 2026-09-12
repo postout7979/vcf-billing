@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -20,23 +19,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models import User, UserRole
+# [v4.0] 실제 해시 로직은 app/security/passwords.py로 분리되어 있다(collector 컨테이너가
+# fastapi/jose 없이도 이 로직을 쓸 수 있게 하기 위함). 기존 호출부
+# (app/routers/*.py, app/seed_data.py)와의 호환을 위해 여기서 그대로 재노출한다.
+from app.security.passwords import hash_password, verify_password  # noqa: F401
 
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
-
-
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
-
-
-def verify_password(plain: str, password_hash: str) -> bool:
-    if not password_hash:
-        return False
-    try:
-        return bcrypt.checkpw(plain.encode("utf-8"), password_hash.encode("ascii"))
-    except ValueError:
-        # 저장된 해시 형식이 깨진 경우 등 - 인증 실패로 취급
-        return False
 
 
 def create_access_token(user: User) -> str:

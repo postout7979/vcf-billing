@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
+from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -351,6 +353,19 @@ def collect_once(db: Session, interval_minutes: int = 5, at: dt.datetime | None 
     return total
 
 
+# [v4.0] Docker Compose의 collector 컨테이너 HEALTHCHECK(docker/collector/Dockerfile)가
+# 참조하는 하트비트 파일. 매 수집 사이클이 끝날 때마다(성공/실패 무관) touch해서, 이
+# 파일의 mtime이 오래됐으면 루프 자체가 멎었다고 판단할 수 있게 한다.
+_HEARTBEAT_PATH = Path(os.environ.get("COLLECTOR_HEARTBEAT_FILE", "/tmp/collector_heartbeat"))
+
+
+def _touch_heartbeat() -> None:
+    try:
+        _HEARTBEAT_PATH.touch()
+    except OSError:  # noqa: BLE001 - 하트비트 기록 실패는 수집 자체를 막을 이유가 아님
+        logger.warning("하트비트 파일(%s) 기록 실패", _HEARTBEAT_PATH)
+
+
 async def run_forever(interval_minutes: int | None = None) -> None:
     """FastAPI 백그라운드 태스크로 실행되는 무한 수집 루프."""
     settings = get_settings()
@@ -367,4 +382,5 @@ async def run_forever(interval_minutes: int | None = None) -> None:
             logger.exception("수집 사이클 중 오류 발생")
         finally:
             db.close()
+            _touch_heartbeat()
         await asyncio.sleep(interval * 60)

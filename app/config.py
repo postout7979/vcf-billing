@@ -38,7 +38,19 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
 
     # DB
+    # [v4.0] Docker Compose 구성에서는 DATABASE_URL 환경변수로 PostgreSQL을 가리키도록
+    # 설정한다 (예: postgresql+psycopg://vcfbilling:...@db:5432/vcfbilling). 여기 있는
+    # SQLite 기본값은 docker-compose 없이 `uvicorn app.main:app`만으로 빠르게 로컬에서
+    # 띄워보는 경우를 위한 폴백이며, 운영 배포에는 사용하지 않는다 (동시 쓰기 시
+    # "database is locked" 발생 가능 - README "아키텍처" 참고).
     database_url: str = f"sqlite:///{BASE_DIR}/data/billing.db"
+
+    # [v4.0] Collector(VM 인벤토리/전원상태 수집 백그라운드 루프)를 API 프로세스 안에서
+    # 함께 띄울지 여부. Docker Compose 구성에서는 collector가 별도 컨테이너로 분리되어
+    # 독립적으로 재시작/재배포되므로 API 서비스는 이 값을 false로 끈다(docker-compose.yml
+    # 참고). docker-compose 없이 이 저장소를 그냥 `uvicorn app.main:app`으로만 띄워보는
+    # 경우(로컬 빠른 확인 등)를 위해 기본값은 true로 유지한다.
+    run_collector_in_process: bool = True
 
     # 과금 기본 통화
     default_currency: str = "KRW"

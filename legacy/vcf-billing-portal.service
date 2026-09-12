@@ -1,3 +1,8 @@
+# [레거시 - v3.x까지] venv + systemd로 직접 구동하는 방식의 systemd 유닛.
+# v4.0부터는 Docker Compose가 프로세스 생명주기(재시작 정책 등)를 대신 관리하므로
+# 이 유닛은 더 이상 필요하지 않다 - docs/docker-deploy.md와 docker-compose.yml의
+# restart: unless-stopped를 참고. 이 파일은 Docker를 쓸 수 없는 환경을 위한 폴백으로만
+# legacy/legacy-ubuntu-deploy.md와 함께 남겨둔다.
 [Unit]
 Description=VCF Billing Portal (FastAPI/Uvicorn)
 After=network.target

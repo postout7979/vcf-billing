@@ -28,9 +28,12 @@ VCF Operations(Aria Operations)에서 수집한 VM 리소스 사용량을 기반
   공식 SDK(pyVmomi, vSphere Automation SDK 등)도 Python 우선으로 제공됩니다.
   FastAPI는 Pydantic 기반 타입 검증과 자동 OpenAPI 문서(`/docs`)를 제공해
   과금 API처럼 정확성이 중요한 서비스에 적합합니다.
-- **DB: SQLite (SQLAlchemy ORM)**
-  데모/소규모 운영에 충분하며, `DATABASE_URL` 설정만으로 PostgreSQL 등으로
-  손쉽게 교체 가능하도록 ORM으로 추상화했습니다. vCenter/Datacenter/Cluster/
+- **DB: PostgreSQL [v4.0] (SQLAlchemy ORM)**
+  Docker Compose로 API/Collector 컨테이너가 분리되고 API도 여러 워커로 뜨면서
+  동시 접속이 필요해져 PostgreSQL로 전환했습니다(v3.x까지는 SQLite 파일 하나를
+  단일 워커가 붙잡는 구조였습니다). `DATABASE_URL` 설정 하나로 교체 가능하도록
+  ORM으로 추상화되어 있어, docker-compose 없이 빠르게 로컬 확인만 할 때는
+  SQLite로 자동 폴백됩니다(`app/config.py` 기본값). vCenter/Datacenter/Cluster/
   VM Folder/Tag는 문자열 속성이 아니라 **정규화된 별도 테이블**로 저장하고,
   Project ↔ Cluster/Folder/Tag는 다대다(M2M) 관계로 표현합니다.
 - **프론트엔드: Vanilla JS + Chart.js (로컬 번들, 외부 CDN 의존 없음)**
@@ -46,6 +49,33 @@ VCF Operations(Aria Operations)에서 수집한 VM 리소스 사용량을 기반
   저장하지 않고, 앱의 `SECRET_KEY`에서 파생한 키로 Fernet 대칭 암호화하여
   저장합니다(`app/security/crypto.py`). API 응답에도 절대 포함되지 않습니다.
 
+## 배포 아키텍처 (v4.0: Docker Compose 다중 컨테이너)
+
+[v4.0]부터 권장 배포 방식은 Docker Compose다 — venv+systemd로 단일 프로세스를
+띄우던 v3.x까지의 방식은 `legacy/legacy-ubuntu-deploy.md`에 폴백으로 남아있다.
+전체 절차는 `docs/docker-deploy.md` 참고. 컨테이너 5개로 구성된다:
+
+```
+db         PostgreSQL (데이터) — v3.x까지의 SQLite 단일 파일을 대체
+migrate    스키마 생성 + 기본 admin 계정 보장 (1회 실행 후 종료)
+api        FastAPI 백엔드 (docker/api/, requirements-api.txt)
+collector  VM 인벤토리/전원상태 5분 주기 수집 백그라운드 프로세스
+           (docker/collector/, requirements-collector.txt — fastapi/uvicorn/
+           reportlab 등 API 전용 패키지가 없는 가벼운 이미지)
+frontend   Nginx: static/ 정적 파일 서빙 + /api/*를 api 컨테이너로 리버스 프록시
+           (docker/frontend/) — TLS 종료는 그대로 호스트 nginx+certbot이 담당
+```
+
+각 서비스를 독립적으로 재빌드/재배포할 수 있다 (`docker compose up -d --build
+api`처럼 하나만). 예를 들어 수집 로직만 고쳤으면 `collector`만 재배포하면 되고
+화면/API는 끊기지 않는다. 코드 공유는 하나의 `app/` 패키지를 그대로 두고
+Dockerfile마다 필요한 부분만 설치하는 방식이다 — `app/collector.py`의
+`run_forever()`는 원래부터 FastAPI에 의존하지 않는 순수 asyncio 루프였기 때문에
+`app/collector_main.py`가 그대로 재사용한다. 스키마 생성/기본 admin 계정 생성은
+`app/bootstrap_db.py`에 모아서 `migrate` 컨테이너가 딱 한 번 실행하는데, 이는
+API를 여러 워커로, collector까지 별도 프로세스로 띄우면서 여러 프로세스가 동시에
+테이블/기본 admin 계정을 만들려다 부딪히는 경쟁 상태를 막기 위함이다.
+
 ## 아키텍처 요약
 
 ```
@@ -58,13 +88,25 @@ app/
                             Mock/Real 클라이언트를 선택 생성
   security/
     crypto.py              연동 계정 비밀번호 암호화/복호화 (Fernet, SECRET_KEY 기반)
+    passwords.py           [v4.0] bcrypt 비밀번호 해시/검증 (FastAPI/JWT 의존성 없음 -
+                            collector 컨테이너의 app/bootstrap_db.py에서도 쓰기 위해
+                            app/auth.py에서 분리. app/auth.py가 재노출하므로 기존
+                            호출부는 변경 없음)
   collector.py           연동 계정별로 5분 주기 vCenter~VM 인벤토리/전원상태를 수집해
                          계층 테이블(VCenter/Datacenter/Cluster/VMFolder/Tag)을 업서트하고
                          PowerSample을 적재한다. 모든 계정의 수집이 끝나면
                          recompute_project_assignments()가 전체 VM의 project_id를
                          모든 Project의 Cluster/Folder/Tag 다중 선택 기준(OR 매칭)으로
                          전역 재계산한다 (한 계정의 연동 실패가 다른 계정 수집을 막지
-                         않도록 예외 격리).
+                         않도록 예외 격리). [v4.0] 매 사이클 종료 시 하트비트 파일을
+                         touch해 Docker 컨테이너 HEALTHCHECK가 읽는다.
+  collector_main.py      [v4.0] collector 컨테이너의 진입점 (`python -m
+                         app.collector_main`). run_forever()가 원래 FastAPI에
+                         의존하지 않는 순수 asyncio 루프였기 때문에 그대로 재사용.
+  bootstrap_db.py         [v4.0] 테이블 생성 + 기본 admin 계정 보장. Docker Compose의
+                         migrate 컨테이너가 API/Collector보다 먼저 1회 실행해,
+                         여러 프로세스가 동시에 스키마/기본 계정을 만들려다 부딪히는
+                         경쟁 상태를 없앤다.
   billing/
     engine.py             순수 과금 계산 로직 (수집 간격 block_minutes 블록 단가 계산,
                             기본값은 collector_interval_minutes=5)
@@ -77,7 +119,14 @@ app/
   schemas.py, database.py, config.py, auth.py, main.py
   seed_data.py           데모 연동 계정 1개(실제 수집 경로로 인벤토리 생성) + 테넌트 2개 ×
                          프로젝트 2개(각기 다른 매칭 기준 조합) + 과거 전원이력 + 계정 시딩
-static/                 프론트엔드 (index.html, css/style.css, js/app.js)
+static/                 프론트엔드 (index.html, css/style.css, js/app.js) - [v4.0]
+                        Docker Compose 배포에서는 frontend(Nginx) 컨테이너가 직접 서빙
+docker/                 [v4.0] api/collector/frontend 각각의 Dockerfile
+docker-compose.yml      [v4.0] db/migrate/api/collector/frontend 5개 서비스 정의
+requirements-api.txt, requirements-collector.txt   [v4.0] 컨테이너별 최소 의존성
+                        (requirements.txt는 venv 레거시 배포용 통합본으로 유지)
+docs/docker-deploy.md   [v4.0] Docker Compose 배포 전체 절차 (신규 설치 기준)
+legacy/                 [레거시] v3.x venv+systemd 배포 절차와 systemd 유닛
 ```
 
 **연동 지점이 분리되어 있습니다.** `app/integrations/base.py`의
@@ -307,7 +356,23 @@ Project는 Cluster / VM Folder / VM Tag 세 종류의 매칭 기준을 **동시�
 - 캘린더 월 조회(`period=month`)에서만 제공됩니다. 최근 7일/30일/이번 달(mtd)처럼
   아직 끝나지 않은 기간은 "결산"의 의미가 없어 버튼이 노출되지 않습니다.
 
-## 로컬 실행 방법
+## 실행 방법
+
+### Docker Compose (권장, v4.0)
+
+```bash
+cp .env.example .env
+# SECRET_KEY / POSTGRES_PASSWORD / DATABASE_URL 채우기 (.env.example 주석 참고)
+
+docker compose up -d --build
+docker compose exec api python -m app.seed_data --days 14   # 샘플 데이터 시딩(선택)
+```
+
+브라우저에서 http://localhost:8080 접속 (frontend 컨테이너). Ubuntu 서버에 실제
+배포하는 전체 절차(사전 준비 패키지, nginx+certbot TLS, 개별 서비스 재배포,
+기존 SQLite 데이터 이관 포함)는 `docs/docker-deploy.md`를 참고하세요.
+
+### venv (docker-compose 없이 빠르게 로컬 확인만 하고 싶을 때)
 
 ```bash
 # 1) 가상환경 및 의존성 설치
@@ -315,7 +380,7 @@ python3 -m venv .venv
 source .venv/bin/activate         # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2) 환경설정
+# 2) 환경설정 - DATABASE_URL 줄을 지우거나 주석 처리하면 SQLite로 자동 폴백됩니다
 cp .env.example .env
 # SECRET_KEY는 JWT 서명뿐 아니라 연동 계정 비밀번호 암호화 키로도 쓰이므로
 # 반드시 충분히 긴 랜덤 값으로 바꾸세요: openssl rand -hex 32
@@ -323,13 +388,13 @@ cp .env.example .env
 # 3) 샘플 데이터 시딩 (데모 연동 계정 1개, 테넌트 2개, 프로젝트 4개, VM 16대, 최근 14일 전원이력)
 python -m app.seed_data --days 14
 
-# 4) 서버 실행
+# 4) 서버 실행 (RUN_COLLECTOR_IN_PROCESS 기본값 true라 collector도 같은 프로세스 안에서 자동 실행)
 uvicorn app.main:app --reload --port 8000
 ```
 
 브라우저에서 http://localhost:8000 접속. API 문서는 http://localhost:8000/docs.
-Ubuntu 서버에 배포하는 전체 절차(사전 준비 패키지, systemd, nginx 리버스
-프록시 포함)는 프로젝트 문서 `vcf-billing-portal-ubuntu-deploy.md`를 참고하세요.
+Docker 자체를 쓸 수 없는 서버에 배포해야 한다면 `legacy/legacy-ubuntu-deploy.md`
+(venv+systemd, v3.x까지의 방식)를 참고하세요.
 
 ### 데모 로그인 계정
 
@@ -524,11 +589,18 @@ Ubuntu 서버에 배포하는 전체 절차(사전 준비 패키지, systemd, ng
   바꾸면 기존에 저장된 연동 계정 비밀번호를 더 이상 복호화할 수 없으므로,
   운영 중에는 `SECRET_KEY`를 변경하지 마세요 (변경이 꼭 필요하면 모든
   연동 계정의 비밀번호를 다시 입력해야 합니다).
-- 스키마 마이그레이션 도구(Alembic 등)가 없고 `Base.metadata.create_all()`로
-  테이블을 생성합니다 — 신규 테이블은 자동으로 생기지만, 기존 테이블에 새
-  컬럼이 추가된 경우(예: 이번 업데이트의 연동 상태 필드 `last_sync_status`
-  등)에는 기존 `data/billing.db` 파일을 그대로 재사용하면 반영되지 않습니다.
-  이번 업데이트를 기존 서버에 적용할 때는 `data/billing.db`를 지우고
-  재시딩하거나(데모 환경), 실 데이터가 있다면 `sqlite3 data/billing.db`로
-  직접 `ALTER TABLE integration_accounts ADD COLUMN ...`을 실행해 컬럼을
-  추가하세요.
+- 스키마 마이그레이션 도구(Alembic 등)가 없고 `app/bootstrap_db.py`의
+  `Base.metadata.create_all()`로 테이블을 생성합니다 — 신규 테이블/DB는 자동으로
+  생기지만, 기존 테이블에 새 컬럼이 추가된 경우(예: v3.x의 연동 상태 필드
+  `last_sync_status` 추가 당시)에는 기존 DB를 그대로 재사용하면 반영되지
+  않습니다. 데모 환경이라면 DB를 지우고 재시딩하는 게 가장 간단합니다
+  ([v4.0] PostgreSQL 기준: `docker compose down -v`로 `db_data` 볼륨까지 지운
+  뒤 다시 `docker compose up -d --build`). 실 데이터가 있는 서버에 스키마
+  변경분을 반영해야 한다면 PostgreSQL에 직접 `ALTER TABLE ... ADD COLUMN
+  ...`을 실행하세요 — SQLite 시절과 달리 PostgreSQL의 네이티브 ENUM 컬럼
+  (`role`, `kind`, `power_state` 등 `Enum(...)` 매핑 컬럼)에 새 값을 추가하는
+  경우는 `ALTER TYPE ... ADD VALUE ...`가 별도로 필요하니 주의하세요.
+- [v4.0] `db_data`라는 이름의 Docker 볼륨 하나에 PostgreSQL 데이터 전체가
+  들어있습니다. 정기 백업(`docker compose exec db pg_dump -U vcfbilling
+  vcfbilling > backup.sql` 등)을 별도로 챙겨야 합니다 - Docker Compose 자체는
+  볼륨을 자동으로 백업해주지 않습니다.
