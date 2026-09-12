@@ -256,6 +256,54 @@ docker compose up -d --build migrate api collector
   network/firewall may be blocking Docker Hub (`registry-1.docker.io`). If
   you have an internal registry mirror, point the `FROM` line in each
   `docker/*/Dockerfile` at that mirror instead.
+- **Integration sync fails with `[Errno -3] Temporary failure in name
+  resolution`**: this is a DNS lookup failure for your VCF
+  Operations/Aria Operations hostname, happening *inside* the `api`/
+  `collector` containers rather than on the host. It's almost always caused
+  by Ubuntu's systemd-resolved: the host's `/etc/resolv.conf` points at the
+  stub resolver `127.0.0.53`, which only works on the host itself — a
+  container's separate network namespace can't reach it, so Docker's
+  container DNS resolution silently breaks for internal/corporate-only
+  hostnames (the host itself still resolves them fine, which is why this
+  only shows up after moving to Docker). Confirm this by comparing:
+
+  ```bash
+  getent hosts <your-vcf-ops-hostname>                    # works on the host
+  docker compose exec api getent hosts <your-vcf-ops-hostname>  # fails in the container
+  ```
+
+  Fix it by pointing the containers at the same DNS server(s) your host
+  actually uses upstream. Find that IP with:
+
+  ```bash
+  resolvectl status | grep -A3 "Current DNS Server"
+  ```
+
+  then set it in `.env` (already wired into `docker-compose.yml` via the
+  `dns:` key on the `api`/`collector`/`migrate` services):
+
+  ```bash
+  DOCKER_DNS_1=<your internal DNS server IP>
+  DOCKER_DNS_2=8.8.8.8   # optional public fallback
+  ```
+
+  Apply it and re-test:
+
+  ```bash
+  docker compose up -d --force-recreate api collector
+  docker compose exec api getent hosts <your-vcf-ops-hostname>
+  ```
+
+  Then retry "가져오기" (sync now) from the admin UI. If the hostname is
+  fixed and you'd rather not expose your internal DNS server to the
+  containers at all, `extra_hosts` is a narrower alternative — add a static
+  hostname-to-IP mapping under the `api`/`collector` services instead of
+  `dns:` (trades off needing an update if that IP ever changes):
+
+  ```yaml
+      extra_hosts:
+        - "<your-vcf-ops-hostname>:<its IP address>"
+  ```
 
 ## Where to go next
 
