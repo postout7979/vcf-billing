@@ -274,15 +274,18 @@
     <form id="rate-form">
       <div class="field-row">
         <label class="field-label" for="rate-vcpu">vCPU 시간당 단가</label>
-        <input id="rate-vcpu" type="number" min="0" step="0.1" required />
+        <input id="rate-vcpu" type="number" min="0" step="0.01" placeholder="예: 120.50" required />
+        <p class="muted small">소숫점 둘째 자리까지 입력 가능합니다 (예: 120.50)</p>
       </div>
       <div class="field-row">
         <label class="field-label" for="rate-vmem">vMEM(GB) 시간당 단가</label>
-        <input id="rate-vmem" type="number" min="0" step="0.1" required />
+        <input id="rate-vmem" type="number" min="0" step="0.01" placeholder="예: 45.75" required />
+        <p class="muted small">소숫점 둘째 자리까지 입력 가능합니다 (예: 45.75)</p>
       </div>
       <div class="field-row">
         <label class="field-label" for="rate-vdisk">vDisk(GB) 시간당 단가</label>
-        <input id="rate-vdisk" type="number" min="0" step="0.01" required />
+        <input id="rate-vdisk" type="number" min="0" step="0.01" placeholder="예: 0.15" required />
+        <p class="muted small">소숫점 둘째 자리까지 입력 가능합니다 (예: 0.15)</p>
       </div>
       <div class="field-row">
         <label class="field-label" for="rate-currency">통화</label>
