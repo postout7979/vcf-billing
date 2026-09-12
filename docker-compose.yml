@@ -43,6 +43,15 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
     env_file: .env
+    dns:
+      # [v4.1] See DOCKER_DNS_1/DOCKER_DNS_2 in .env.example - without this,
+      # containers inherit the host's /etc/resolv.conf, which on Ubuntu is
+      # often just the systemd-resolved stub (127.0.0.53) and unreachable
+      # from inside a container. migrate itself doesn't call out to VCF
+      # Operations, but it shares the api image/config, so it gets the same
+      # setting for consistency.
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
     depends_on:
       db:
         condition: service_healthy
@@ -57,6 +66,13 @@ services:
     environment:
       # collector는 별도 컨테이너로 뜨므로 API 프로세스 안에서는 중복 실행하지 않는다.
       RUN_COLLECTOR_IN_PROCESS: "false"
+    dns:
+      # [v4.1] Needed to resolve the VCF Operations/Aria Operations hostname
+      # when an integration account is created/edited or "가져오기" (sync
+      # now) is triggered from the admin UI - see DOCKER_DNS_1/DOCKER_DNS_2
+      # in .env.example.
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -67,6 +83,12 @@ services:
       context: .
       dockerfile: docker/collector/Dockerfile
     env_file: .env
+    dns:
+      # [v4.1] Needed to resolve the VCF Operations/Aria Operations hostname
+      # on every collection cycle - see DOCKER_DNS_1/DOCKER_DNS_2 in
+      # .env.example.
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
     depends_on:
       migrate:
         condition: service_completed_successfully
