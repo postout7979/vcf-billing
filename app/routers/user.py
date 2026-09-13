@@ -9,13 +9,15 @@ from app.billing.aggregator import (
     available_months,
     calendar_month_period,
     compute_all_projects_usage,
+    compute_month_forecast,
     compute_project_usage,
+    period_over_period_change,
 )
 from app.billing.statement_pdf import build_project_statement_pdf
 from app.database import get_db
 from app.models import Project, User
 from app.routers.common import parse_month_param, parse_period, project_usage_to_schema
-from app.schemas import AdminOverviewOut, ProjectUsageOut
+from app.schemas import AdminOverviewOut, MonthForecastOut, ProjectUsageOut
 
 router = APIRouter(prefix="/api/me", tags=["me"])
 
@@ -61,6 +63,10 @@ def my_overview(
         currency_note = "프로젝트별 통화가 상이하여 합계는 참고용입니다"
 
     tenant_name = user.tenant.name if user.tenant else None
+    total_cost = round(sum(p.total_cost for p in project_schemas), 2)
+    previous_period_total_cost, period_over_period_change_pct = period_over_period_change(
+        db, s, e, total_cost, tenant_id=tenant_id
+    )
     return AdminOverviewOut(
         period_start=s,
         period_end=e,
@@ -69,9 +75,26 @@ def my_overview(
         total_projects=len(project_schemas),
         total_vms=sum(p.vm_count for p in project_schemas),
         total_powered_on_vms=sum(p.powered_on_vm_count for p in project_schemas),
-        total_cost=round(sum(p.total_cost for p in project_schemas), 2),
+        total_cost=total_cost,
         currency_note=currency_note,
         projects=project_schemas,
+        previous_period_total_cost=previous_period_total_cost,
+        period_over_period_change_pct=period_over_period_change_pct,
+    )
+
+
+@router.get("/forecast", response_model=MonthForecastOut)
+def my_month_forecast(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> MonthForecastOut:
+    """[v4.7] 이번 달 예상 청구액 (배정된 테넌트 범위)."""
+    tenant_id = _require_tenant(user)
+    result = compute_month_forecast(db, tenant_id=tenant_id)
+    return MonthForecastOut(
+        month=result.month,
+        mtd_total_cost=result.mtd_total_cost,
+        days_elapsed=result.days_elapsed,
+        days_in_month=result.days_in_month,
+        forecast_total_cost=result.forecast_total_cost,
+        currency_note=result.currency_note,
     )
 
 

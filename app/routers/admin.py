@@ -16,8 +16,10 @@ from app.billing.aggregator import (
     available_months,
     calendar_month_period,
     compute_all_projects_usage,
+    compute_month_forecast,
     compute_project_usage,
     default_period,
+    period_over_period_change,
 )
 from app.billing.statement_pdf import build_project_statement_pdf
 from app.collector import recompute_project_assignments, sync_account_once
@@ -58,6 +60,7 @@ from app.schemas import (
     IntegrationAccountUpdate,
     IntegrationInventoryOut,
     IntegrationSyncOut,
+    MonthForecastOut,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -225,6 +228,11 @@ def overview(
             )
         tenant_summaries.sort(key=lambda t: t.tenant_name)
 
+    total_cost = round(sum(p.total_cost for p in project_schemas), 2)
+    previous_period_total_cost, period_over_period_change_pct = period_over_period_change(
+        db, s, e, total_cost, tenant_id=tenant_id
+    )
+
     return AdminOverviewOut(
         period_start=s,
         period_end=e,
@@ -233,10 +241,31 @@ def overview(
         total_projects=len(project_schemas),
         total_vms=sum(p.vm_count for p in project_schemas),
         total_powered_on_vms=sum(p.powered_on_vm_count for p in project_schemas),
-        total_cost=round(sum(p.total_cost for p in project_schemas), 2),
+        total_cost=total_cost,
         currency_note=currency_note,
         projects=project_schemas,
         tenant_summaries=tenant_summaries,
+        previous_period_total_cost=previous_period_total_cost,
+        period_over_period_change_pct=period_over_period_change_pct,
+    )
+
+
+@router.get("/forecast", response_model=MonthForecastOut)
+def month_forecast(
+    tenant_id: int | None = Query(None, description="지정 시 해당 테넌트만 대상으로 함"),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> MonthForecastOut:
+    """[v4.7] 이번 달(1일~현재) 실적을 바탕으로 한 이번 달 예상 청구액. 화면에서 선택 중인
+    조회 기간(period)과 무관하게 항상 현재 캘린더 월 기준으로 계산한다."""
+    result = compute_month_forecast(db, tenant_id=tenant_id)
+    return MonthForecastOut(
+        month=result.month,
+        mtd_total_cost=result.mtd_total_cost,
+        days_elapsed=result.days_elapsed,
+        days_in_month=result.days_in_month,
+        forecast_total_cost=result.forecast_total_cost,
+        currency_note=result.currency_note,
     )
 
 

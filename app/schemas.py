@@ -376,6 +376,21 @@ class AdminOverviewOut(BaseModel):
     currency_note: str
     projects: list[ProjectUsageOut]
     tenant_summaries: list[TenantSummaryOut] = []
+    # [v4.7] "직전 기간 대비 증감" - 현재 조회 기간과 동일한 길이의 바로 이전 기간 합계 및
+    # 증감률(%). 직전 기간 요금이 0이면 나눗셈이 무의미해 change_pct는 None.
+    previous_period_total_cost: float = 0.0
+    period_over_period_change_pct: float | None = None
+
+
+class MonthForecastOut(BaseModel):
+    """[v4.7] "이번 달 예상 청구액" - 선택된 조회 기간과 무관하게 항상 현재 캘린더 월 기준."""
+
+    month: str
+    mtd_total_cost: float
+    days_elapsed: float
+    days_in_month: int
+    forecast_total_cost: float
+    currency_note: str
 
 
 class DbTableStatOut(BaseModel):

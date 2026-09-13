@@ -194,7 +194,7 @@ main.view {
   color: var(--text-muted);
   margin: 14px 0 6px;
 }
-select, input[type="email"], input[type="number"], input[type="text"], input[type="password"] {
+select, input[type="email"], input[type="number"], input[type="text"], input[type="password"], input[type="search"] {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -234,6 +234,35 @@ select:focus, input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 /* [v4.6] "새 DATABASE_URL" 같은 값 옆에 복사 버튼을 붙이는 행 */
 .copy-row { display: flex; gap: 8px; }
 .copy-row input { flex: 1; }
+
+/* [v4.7] VM 드릴다운 팝업 검색 바 + 페이지네이션 */
+.drilldown-toolbar { padding: 0 4px 10px; }
+.drilldown-toolbar input[type="search"] { max-width: 320px; }
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 12px 4px 4px;
+}
+.pager-info { font-size: 12.5px; color: var(--text-muted); }
+
+/* [v4.7] "데이터베이스" 탭 상위 메뉴 카드(현재 상태/내보내기/외부 연결 각각 팝업으로 진입) */
+.menu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+.menu-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.menu-card h4 { margin: 0; font-size: 14px; }
+.menu-card p { margin: 0; flex: 1; }
 
 /* ---------- 로그인 ---------- */
 .login-card { width: 400px; max-width: 100%; padding: 28px 26px 22px; }

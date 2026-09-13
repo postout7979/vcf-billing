@@ -5,6 +5,7 @@ DB 조회 + billing.engine 을 결합하여 프로젝트/기간 단위 사용량
 """
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 from dataclasses import dataclass, field
 
@@ -194,6 +195,89 @@ def calendar_month_period(year: int, month: int) -> tuple[dt.datetime, dt.dateti
     else:
         end_kst = dt.datetime(year, month + 1, 1, tzinfo=KST)
     return start_kst.astimezone(dt.timezone.utc), end_kst.astimezone(dt.timezone.utc)
+
+
+def _currency_note(results: list[ProjectUsageResult]) -> str:
+    currencies = {r.currency for r in results}
+    if not currencies:
+        return "-"
+    return next(iter(currencies)) if len(currencies) == 1 else "혼합"
+
+
+def total_cost_for_range(db: Session, start: dt.datetime, end: dt.datetime, tenant_id: int | None = None) -> float:
+    """[v4.7] 지정 기간 전체(또는 tenant_id로 필터링한) 프로젝트 총 요금 합계만 필요할 때 쓰는
+    가벼운 헬퍼 - "전월/직전 기간 대비 증감" 계산처럼 VM별 상세 없이 합계 한 줄만 있으면 될 때
+    compute_all_projects_usage()를 그대로 호출하되 합산까지 여기서 끝낸다."""
+    results = compute_all_projects_usage(db, start, end, tenant_id=tenant_id)
+    return round(sum(r.total_cost for r in results), 2)
+
+
+def period_over_period_change(
+    db: Session, start: dt.datetime, end: dt.datetime, current_total_cost: float, tenant_id: int | None = None
+) -> tuple[float, float | None]:
+    """[v4.7] "전월 대비 증감" - 현재 조회 중인 기간과 정확히 같은 길이의 직전 기간을 비교한다.
+
+    캘린더 월 경계를 특별 취급하지 않고 "현재 기간 길이만큼 그 직전"을 항상 비교 대상으로 삼는다
+    (period=7d/30d/mtd/month/custom 어떤 모드든 동일한 방식으로 일관되게 동작하도록 하기 위한
+    설계 결정 - 예: period=month로 특정 캘린더 월을 조회 중이면 그 직전 같은 일수만큼이 비교
+    대상이 되어, 대부분의 경우 사실상 "전월"과 거의 같지만 월별 일수 차이(28~31일)만큼은
+    정확히 전월 1일~말일과 일치하지 않을 수 있다).
+
+    반환값: (직전 기간 총 요금, 증감률(%) - 직전 기간 요금이 0이면 나눗셈이 무의미해 None)
+    """
+    duration = end - start
+    prev_start = start - duration
+    prev_end = start
+    previous_total_cost = total_cost_for_range(db, prev_start, prev_end, tenant_id=tenant_id)
+    if previous_total_cost > 0:
+        change_pct = round((current_total_cost - previous_total_cost) / previous_total_cost * 100, 1)
+    else:
+        change_pct = None  # 직전 기간에 사용량/요금이 전혀 없었으면 증감률 자체가 정의되지 않음
+    return previous_total_cost, change_pct
+
+
+@dataclass
+class MonthForecastResult:
+    """[v4.7] "이번 달 예상 청구액" - 이번 달 1일부터 지금까지의 실적을 하루 평균으로 환산해
+    이번 달 전체 일수에 곱한 단순 run-rate 추정치. 선택된 조회 기간(period 파라미터)과 무관하게
+    항상 "지금 이 순간의 캘린더 월" 기준으로 계산한다 - 사용자가 예를 들어 "최근 7일" 화면을
+    보고 있어도 "이번 달 예상 청구액"은 별개로 항상 확인할 수 있어야 하기 때문."""
+
+    month: str  # "YYYY-MM" (KST 기준)
+    mtd_total_cost: float
+    days_elapsed: float
+    days_in_month: int
+    forecast_total_cost: float
+    currency_note: str
+
+
+def compute_month_forecast(db: Session, tenant_id: int | None = None) -> MonthForecastResult:
+    now_kst = dt.datetime.now(KST)
+    month_start_kst = now_kst.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_utc = month_start_kst.astimezone(dt.timezone.utc)
+    end_utc = dt.datetime.now(dt.timezone.utc)
+
+    results = compute_all_projects_usage(db, start_utc, end_utc, tenant_id=tenant_id)
+    mtd_total_cost = round(sum(r.total_cost for r in results), 2)
+    days_in_month = calendar.monthrange(now_kst.year, now_kst.month)[1]
+    days_elapsed = max((now_kst - month_start_kst).total_seconds() / 86400.0, 0.0)
+
+    # 월 시작 직후(예: 반나절도 안 지난 시점)에는 하루 평균이 극단적으로 튀어 추정치가
+    # 왜곡되므로, 최소 반나절(0.5일)이 지나기 전까지는 예측 대신 지금까지의 실적 그대로를
+    # "예상액"으로 보여준다(=아직 추정할 근거가 부족함을 값 자체로 나타냄).
+    if days_elapsed < 0.5:
+        forecast_total_cost = mtd_total_cost
+    else:
+        forecast_total_cost = round(mtd_total_cost / days_elapsed * days_in_month, 2)
+
+    return MonthForecastResult(
+        month=now_kst.strftime("%Y-%m"),
+        mtd_total_cost=mtd_total_cost,
+        days_elapsed=round(days_elapsed, 2),
+        days_in_month=days_in_month,
+        forecast_total_cost=forecast_total_cost,
+        currency_note=_currency_note(results),
+    )
 
 
 def available_months(db: Session, tenant_id: int | None = None) -> list[str]:

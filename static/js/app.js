@@ -7,6 +7,14 @@
 const API_BASE = "/api";
 const COLORS = { vcpu: "#2f6fed", vmem: "#12a594", vdisk: "#d98a1c" };
 
+// [v4.7] 저사용 VM 다운사이징 권고 임계값 - CPU/MEM 평균 사용률이 둘 다 아래이고,
+// 기간의 절반 이상 Power-On 상태였던 VM만 후보로 본다(잠깐 켰다 끈 VM을 낮은
+// 사용률로 오인해 권고하는 것을 방지). 관리자별 조정 UI는 아직 없음 - 필요해지면
+// 프로젝트별 RateCard처럼 설정 가능하게 확장할 수 있다.
+const DOWNSIZING_CPU_THRESHOLD_PCT = 20;
+const DOWNSIZING_MEM_THRESHOLD_PCT = 30;
+const DOWNSIZING_MIN_UPTIME_RATIO = 0.5;
+
 const state = {
   token: localStorage.getItem("vcf_billing_token") || null,
   user: null,
@@ -301,6 +309,30 @@ async function boot() {
   document.getElementById("user-drilldown-close").addEventListener("click", () => {
     document.getElementById("user-drilldown").hidden = true;
   });
+
+  // [v4.7] VM 드릴다운 팝업 검색/페이지네이션 - 관리자/사용자 공통 로직(kind로만 구분).
+  document.getElementById("drilldown-search").addEventListener("input", (e) => {
+    drilldownPaging.admin.query = e.target.value;
+    drilldownPaging.admin.page = 1;
+    renderVmTablePaged("admin");
+  });
+  document.getElementById("drilldown-pager").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-page]");
+    if (!btn || btn.disabled) return;
+    drilldownPaging.admin.page += btn.dataset.page === "prev" ? -1 : 1;
+    renderVmTablePaged("admin");
+  });
+  document.getElementById("user-drilldown-search").addEventListener("input", (e) => {
+    drilldownPaging.user.query = e.target.value;
+    drilldownPaging.user.page = 1;
+    renderVmTablePaged("user");
+  });
+  document.getElementById("user-drilldown-pager").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-page]");
+    if (!btn || btn.disabled) return;
+    drilldownPaging.user.page += btn.dataset.page === "prev" ? -1 : 1;
+    renderVmTablePaged("user");
+  });
   document.getElementById("user-drilldown-pdf-btn").addEventListener("click", (e) => {
     const projectId = e.currentTarget.dataset.projectId;
     if (!projectId || !isMonthMode()) return;
@@ -383,9 +415,13 @@ async function boot() {
   document.getElementById("user-reset-password-cancel-btn").addEventListener("click", closeResetPasswordModal);
   document.getElementById("user-reset-password-form").addEventListener("submit", onResetPasswordFormSubmit);
 
-  // [v4.6] 데이터베이스
-  document.getElementById("database-refresh-btn").addEventListener("click", loadDatabaseOverview);
+  // [v4.6→v4.7] 데이터베이스 - "현재 상태"/"외부 DB 연결"은 각각 버튼으로 여는 별도 팝업
+  document.getElementById("database-status-open-btn").addEventListener("click", openDatabaseStatusModal);
+  document.getElementById("database-status-refresh-btn").addEventListener("click", loadDatabaseOverview);
+  document.getElementById("database-status-modal-close").addEventListener("click", closeDatabaseStatusModal);
   document.getElementById("database-export-btn").addEventListener("click", onDatabaseExport);
+  document.getElementById("external-db-open-btn").addEventListener("click", openExternalDbModal);
+  document.getElementById("external-db-modal-close").addEventListener("click", closeExternalDbModal);
   document.getElementById("external-db-test-btn").addEventListener("click", onExternalDbTest);
   document.getElementById("external-db-form").addEventListener("submit", onExternalDbMigrateSubmit);
   document.getElementById("external-db-migrate-copy-btn").addEventListener("click", onCopyExternalDbUrl);
@@ -514,8 +550,16 @@ let userViewRequestSeq = 0;
 async function loadUserView() {
   const mySeq = ++userViewRequestSeq;
   let data;
+  let forecast = null;
   try {
-    data = await api(`/me/overview?${periodQueryString()}`);
+    // [v4.7] "이번 달 예상 청구액"은 선택된 조회 기간과 무관하게 항상 필요하므로 함께 가져온다.
+    // forecast 쪽은 실패해도(예: 일시적 오류) 개요 화면 전체가 죽지 않도록 별도로 처리한다.
+    const [overviewData, forecastData] = await Promise.all([
+      api(`/me/overview?${periodQueryString()}`),
+      api("/me/forecast").catch(() => null),
+    ]);
+    data = overviewData;
+    forecast = forecastData;
   } catch (err) {
     if (mySeq === userViewRequestSeq) showToast(err.message, "error");
     return;
@@ -527,15 +571,24 @@ async function loadUserView() {
   document.getElementById("user-period-label").textContent = periodLabel(data);
   document.getElementById("user-currency-note").textContent = data.currency_note;
 
+  const currency = data.projects[0]?.currency || "KRW";
   renderKpiGrid(document.getElementById("user-kpis"), [
     { label: "프로젝트 수", value: fmtNum(data.total_projects), dot: COLORS.vcpu },
     { label: "전체 VM", value: fmtNum(data.total_vms), sub: `가동 ${fmtNum(data.total_powered_on_vms)}대`, dot: COLORS.vmem },
-    { label: "기간 예상 요금", value: fmtMoney(data.total_cost, data.projects[0]?.currency || "KRW"), highlight: true },
+    { label: "기간 예상 요금", value: fmtMoney(data.total_cost, currency), highlight: true },
+    periodChangeKpi(data, currency),
+    forecastKpi(forecast),
   ]);
 
   renderProjectComparisonChart("user-project-chart", data.projects);
   renderAggregatedDailyChart("user-daily-chart", data.projects);
   renderUserProjectTable(data.projects);
+  renderDownsizingTable(
+    document.getElementById("user-downsizing-table-body"),
+    document.getElementById("user-downsizing-note"),
+    computeDownsizingCandidates(data.projects),
+    false
+  );
 
   document.getElementById("user-drilldown").hidden = true;
 }
@@ -585,7 +638,10 @@ function openUserDrilldown(projectId) {
   if (!project) return;
   document.getElementById("user-drilldown").hidden = false;
   document.getElementById("user-drilldown-title").textContent = `${project.project_name} — VM별 상세`;
-  renderVmTable(document.getElementById("user-drilldown-vm-table-body"), project.vms, project.currency);
+
+  drilldownPaging.user = { vms: project.vms, currency: project.currency, query: "", page: 1 };
+  document.getElementById("user-drilldown-search").value = "";
+  renderVmTablePaged("user");
 
   const pdfBtn = document.getElementById("user-drilldown-pdf-btn");
   pdfBtn.hidden = !isMonthMode();
@@ -607,9 +663,9 @@ function renderKpiGrid(container, items) {
     .join("");
 }
 
-function renderVmTable(tbody, vms, currency) {
+function renderVmTable(tbody, vms, currency, emptyMessage = "표시할 VM이 없습니다.") {
   if (!vms.length) {
-    tbody.innerHTML = `<tr><td colspan="11" class="muted">표시할 VM이 없습니다.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="muted">${escapeHtml(emptyMessage)}</td></tr>`;
     return;
   }
   tbody.innerHTML = vms
@@ -632,9 +688,127 @@ function renderVmTable(tbody, vms, currency) {
     .join("");
 }
 
+/* ---------------------------- [v4.7] VM 드릴다운 팝업 - 페이지네이션 + 이름 검색 ---------------------------- */
+
+const VM_DRILLDOWN_PAGE_SIZE = 20;
+// 관리자/사용자 드릴다운 팝업은 서로 다른 DOM(prefix)을 쓰지만 로직은 완전히 동일하므로
+// kind("admin" | "user")별로 현재 프로젝트의 VM 전체 목록 + 검색어 + 현재 페이지만 들고 있는다.
+const drilldownPaging = {
+  admin: { vms: [], currency: "KRW", query: "", page: 1 },
+  user: { vms: [], currency: "KRW", query: "", page: 1 },
+};
+
+function _drilldownPrefix(kind) {
+  return kind === "admin" ? "drilldown" : "user-drilldown";
+}
+
+function renderVmTablePaged(kind) {
+  const d = drilldownPaging[kind];
+  const prefix = _drilldownPrefix(kind);
+  const q = d.query.trim().toLowerCase();
+  const filtered = q ? d.vms.filter((v) => v.vm_name.toLowerCase().includes(q)) : d.vms;
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / VM_DRILLDOWN_PAGE_SIZE));
+  d.page = Math.min(Math.max(d.page, 1), totalPages);
+  const startIdx = (d.page - 1) * VM_DRILLDOWN_PAGE_SIZE;
+  const pageItems = filtered.slice(startIdx, startIdx + VM_DRILLDOWN_PAGE_SIZE);
+
+  const emptyMessage = q ? `"${d.query}"와(과) 일치하는 VM이 없습니다.` : "표시할 VM이 없습니다.";
+  renderVmTable(document.getElementById(`${prefix}-vm-table-body`), pageItems, d.currency, emptyMessage);
+  renderVmPager(prefix, d.page, totalPages, filtered.length);
+}
+
+function renderVmPager(prefix, page, totalPages, totalCount) {
+  const el = document.getElementById(`${prefix}-pager`);
+  if (!totalCount) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = `
+    <button type="button" class="btn btn-ghost btn-sm" data-page="prev" ${page <= 1 ? "disabled" : ""}>‹ 이전</button>
+    <span class="pager-info">${page} / ${totalPages}페이지 · 총 ${fmtNum(totalCount)}대</span>
+    <button type="button" class="btn btn-ghost btn-sm" data-page="next" ${page >= totalPages ? "disabled" : ""}>다음 ›</button>
+  `;
+}
+
 function fmtUsagePct(pct) {
   if (pct === null || pct === undefined) return "-";
   return `${fmtNum(pct, 0)}%`;
+}
+
+/* ---------------------------- [v4.7] 직전 기간 대비 증감 / 예상 청구액 / 다운사이징 권고 ---------------------------- */
+
+function fmtChangePct(pct) {
+  if (pct === null || pct === undefined) return "—";
+  const arrow = pct > 0 ? "▲" : pct < 0 ? "▼" : "‒";
+  return `${arrow} ${Math.abs(pct).toFixed(1)}%`;
+}
+
+/** AdminOverviewOut(admin/me 공용)에서 "직전 기간 대비" KPI 카드 하나를 만든다. */
+function periodChangeKpi(data, currency) {
+  const sub =
+    data.previous_period_total_cost > 0
+      ? `직전 기간 합계: ${fmtMoney(data.previous_period_total_cost, currency)}`
+      : "직전 기간에 사용량 없음";
+  return { label: "직전 기간 대비", value: fmtChangePct(data.period_over_period_change_pct), sub };
+}
+
+/** MonthForecastOut에서 "이번 달 예상 청구액" KPI 카드 하나를 만든다. forecast가 아직 로딩
+ * 전이거나 실패했으면 null을 받아 안내만 표시한다. */
+function forecastKpi(forecast) {
+  if (!forecast) {
+    return { label: "이번 달 예상 청구액", value: "-", sub: "불러오지 못했습니다" };
+  }
+  return {
+    label: "이번 달 예상 청구액",
+    value: fmtMoney(forecast.forecast_total_cost, forecast.currency_note === "혼합" ? "KRW" : forecast.currency_note),
+    sub: `현재까지 ${fmtMoney(forecast.mtd_total_cost, forecast.currency_note === "혼합" ? "KRW" : forecast.currency_note)} · ${forecast.days_elapsed.toFixed(1)}/${forecast.days_in_month}일 경과`,
+  };
+}
+
+/** projects(ProjectUsageOut[])에서 다운사이징 후보 VM을 뽑아 사용률 낮은 순으로 정렬한다. */
+function computeDownsizingCandidates(projects) {
+  const candidates = [];
+  for (const p of projects) {
+    for (const v of p.vms) {
+      if (v.uptime_ratio < DOWNSIZING_MIN_UPTIME_RATIO) continue;
+      if (v.avg_cpu_usage_pct == null || v.avg_mem_usage_pct == null) continue;
+      if (v.avg_cpu_usage_pct < DOWNSIZING_CPU_THRESHOLD_PCT && v.avg_mem_usage_pct < DOWNSIZING_MEM_THRESHOLD_PCT) {
+        candidates.push({
+          ...v,
+          project_name: p.project_name,
+          tenant_name: p.tenant_name,
+          currency: p.currency,
+        });
+      }
+    }
+  }
+  candidates.sort((a, b) => a.avg_cpu_usage_pct + a.avg_mem_usage_pct - (b.avg_cpu_usage_pct + b.avg_mem_usage_pct));
+  return candidates;
+}
+
+function renderDownsizingTable(tbody, noteEl, candidates, includeTenant) {
+  const thresholdNote = `CPU 평균 사용률 ${DOWNSIZING_CPU_THRESHOLD_PCT}% 미만 및 MEM 평균 사용률 ${DOWNSIZING_MEM_THRESHOLD_PCT}% 미만이면서, 기간의 절반 이상 Power-On 상태였던 VM이 대상입니다 (사용률 데이터가 없는 VM은 제외).`;
+  if (!candidates.length) {
+    tbody.innerHTML = `<tr><td colspan="${includeTenant ? 7 : 6}" class="muted">현재 조회 기간 기준 다운사이징 권고 대상이 없습니다.</td></tr>`;
+    noteEl.textContent = thresholdNote;
+    return;
+  }
+  noteEl.textContent = `${candidates.length}대 권고 · ${thresholdNote}`;
+  tbody.innerHTML = candidates
+    .map(
+      (v) => `
+    <tr>
+      <td class="vm-name">${escapeHtml(v.vm_name)}</td>
+      <td>${escapeHtml(v.project_name)}</td>
+      ${includeTenant ? `<td>${escapeHtml(v.tenant_name)}</td>` : ""}
+      <td class="num">${fmtUsagePct(v.avg_cpu_usage_pct)}</td>
+      <td class="num">${fmtUsagePct(v.avg_mem_usage_pct)}</td>
+      <td class="num">${uptimePillHtml(v.uptime_ratio)}</td>
+      <td class="num strong">${fmtMoney(v.total_cost, v.currency)}</td>
+    </tr>`
+    )
+    .join("");
 }
 
 /* ---------------------------- 차트 (관리자/사용자 공용) ---------------------------- */
@@ -737,9 +911,10 @@ function switchAdminPage(page) {
   } else if (page === "system") {
     loadSystemStatus();
     startSystemStatusAutoRefresh();
-  } else if (page === "database") {
-    loadDatabaseOverview();
   }
+  // [v4.7] "데이터베이스" 탭 자체는 메뉴(버튼) 3개만 보여주는 정적 화면이라 탭 진입 시
+  // 별도로 불러올 데이터가 없다 - "현재 DB 상태" 팝업을 열 때만 openDatabaseStatusModal()이
+  // loadDatabaseOverview()를 호출한다.
 }
 
 /* ---------------------------- 관리자 화면 - 시스템 상태 (v4.4) ---------------------------- */
@@ -825,7 +1000,24 @@ async function loadSystemStatus() {
   }
 }
 
-/* ---------------------------- 관리자 화면 - 데이터베이스 (v4.6) ---------------------------- */
+/* ---------------------------- 관리자 화면 - 데이터베이스 (v4.6, v4.7에서 팝업 구조로 재구성) ---------------------------- */
+
+function openDatabaseStatusModal() {
+  document.getElementById("database-status-modal").hidden = false;
+  loadDatabaseOverview();
+}
+
+function closeDatabaseStatusModal() {
+  document.getElementById("database-status-modal").hidden = true;
+}
+
+function openExternalDbModal() {
+  document.getElementById("external-db-modal").hidden = false;
+}
+
+function closeExternalDbModal() {
+  document.getElementById("external-db-modal").hidden = true;
+}
 
 async function loadDatabaseOverview() {
   let data;
@@ -1179,9 +1371,18 @@ let adminViewRequestSeq = 0;
 async function loadAdminView() {
   const mySeq = ++adminViewRequestSeq;
   const tenantQuery = state.adminTenantFilter ? `&tenant_id=${encodeURIComponent(state.adminTenantFilter)}` : "";
+  const forecastQuery = state.adminTenantFilter ? `?tenant_id=${encodeURIComponent(state.adminTenantFilter)}` : "";
   let data;
+  let forecast = null;
   try {
-    data = await api(`/admin/overview?${periodQueryString()}${tenantQuery}`);
+    // [v4.7] "이번 달 예상 청구액"은 선택된 조회 기간과 무관하게 항상 필요하므로 함께 가져온다
+    // (현재 테넌트 필터는 그대로 반영). forecast 실패는 개요 화면 전체를 막지 않는다.
+    const [overviewData, forecastData] = await Promise.all([
+      api(`/admin/overview?${periodQueryString()}${tenantQuery}`),
+      api(`/admin/forecast${forecastQuery}`).catch(() => null),
+    ]);
+    data = overviewData;
+    forecast = forecastData;
   } catch (err) {
     if (mySeq === adminViewRequestSeq) showToast(err.message, "error");
     return;
@@ -1195,16 +1396,25 @@ async function loadAdminView() {
   document.getElementById("admin-period-label").textContent = periodLabel(data);
   document.getElementById("admin-currency-note").textContent = data.currency_note;
 
+  const currency = data.projects[0]?.currency || "KRW";
   renderKpiGrid(document.getElementById("admin-kpis"), [
     { label: "프로젝트 수", value: fmtNum(data.total_projects), dot: COLORS.vcpu },
     { label: "전체 VM", value: fmtNum(data.total_vms), sub: `가동 ${fmtNum(data.total_powered_on_vms)}대`, dot: COLORS.vmem },
-    { label: "전체 기간 요금", value: fmtMoney(data.total_cost, data.projects[0]?.currency || "KRW"), highlight: true },
+    { label: "전체 기간 요금", value: fmtMoney(data.total_cost, currency), highlight: true },
+    periodChangeKpi(data, currency),
+    forecastKpi(forecast),
   ]);
 
   renderProjectComparisonChart("admin-project-chart", data.projects);
   renderAggregatedDailyChart("admin-daily-chart", data.projects);
   renderAdminProjectTable(data.projects);
   renderTenantSummary(data.tenant_id, data.tenant_summaries || []);
+  renderDownsizingTable(
+    document.getElementById("admin-downsizing-table-body"),
+    document.getElementById("admin-downsizing-note"),
+    computeDownsizingCandidates(data.projects),
+    true
+  );
 
   document.getElementById("admin-drilldown").hidden = true;
 }
@@ -1288,7 +1498,10 @@ function openDrilldown(projectId) {
   if (!project) return;
   document.getElementById("admin-drilldown").hidden = false;
   document.getElementById("drilldown-title").textContent = `${project.project_name} — VM별 상세`;
-  renderVmTable(document.getElementById("drilldown-vm-table-body"), project.vms, project.currency);
+
+  drilldownPaging.admin = { vms: project.vms, currency: project.currency, query: "", page: 1 };
+  document.getElementById("drilldown-search").value = "";
+  renderVmTablePaged("admin");
 
   const pdfBtn = document.getElementById("drilldown-pdf-btn");
   pdfBtn.hidden = !isMonthMode();
