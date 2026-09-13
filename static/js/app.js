@@ -30,6 +30,11 @@ const state = {
   // Cluster/VM Folder/VM Tag 다중 선택 상태 (id Set). 연동 계정을 전환해도 선택 내역이
   // 유지되도록 checkbox 렌더링과 분리해서 관리한다.
   projectEditPicker: { clusters: new Set(), folders: new Set(), tags: new Set() },
+  // [v4.5] 사용자 관리
+  users: [], // 관리자: 전체 사용자 목록 캐시
+  userModalMode: "create", // create | edit
+  editingUserId: null,
+  resettingUserId: null, // 현재 열려 있는 "비밀번호 초기화" 모달의 대상 사용자 id
 };
 
 // 기간/월 선택 UI를 빠르게 연속 조작할 때, 먼저 시작된(느린) 흐름이 나중에 끝나
@@ -340,7 +345,8 @@ async function boot() {
     if (state.currentTenantDetailId) onTenantDelete(state.currentTenantDetailId);
   });
 
-  document.getElementById("tenant-user-form").addEventListener("submit", onTenantUserFormSubmit);
+  // [v4.5] 테넌트 상세 패널의 사용자 생성 인라인 폼은 "사용자 관리" 메뉴로 분리되었다 -
+  // 관련 바인딩은 아래 "사용자 관리" 섹션 참고.
 
   // [v3.5] 프로젝트 추가는 더 이상 테넌트 상세 패널에 인라인 폼으로 있지 않고, "관리" 모달
   // 안의 "+ 프로젝트 추가" 버튼이 프로젝트 생성/수정 공용 팝업(project-edit-modal)을 연다.
@@ -366,6 +372,16 @@ async function boot() {
 
   // [v4.4] 시스템 상태
   document.getElementById("system-status-refresh-btn").addEventListener("click", loadSystemStatus);
+
+  // [v4.5] 사용자 관리
+  document.getElementById("user-create-btn").addEventListener("click", () => openUserModal("create"));
+  document.getElementById("user-modal-close").addEventListener("click", closeUserModal);
+  document.getElementById("user-cancel-btn").addEventListener("click", closeUserModal);
+  document.getElementById("user-form").addEventListener("submit", onUserFormSubmit);
+  document.getElementById("user-role-select").addEventListener("change", updateUserTenantFieldVisibility);
+  document.getElementById("user-reset-password-modal-close").addEventListener("click", closeResetPasswordModal);
+  document.getElementById("user-reset-password-cancel-btn").addEventListener("click", closeResetPasswordModal);
+  document.getElementById("user-reset-password-form").addEventListener("submit", onResetPasswordFormSubmit);
 
   if (state.token) {
     try {
@@ -407,7 +423,9 @@ function enterApp() {
   document.getElementById("view-user").hidden = isAdmin;
   document.getElementById("view-admin").hidden = !isAdmin;
   document.getElementById("admin-tenant-filter").hidden = !isAdmin;
-  document.getElementById("change-password-btn").hidden = !isAdmin;
+  // [v4.5] 본인 비밀번호 변경은 이제 관리자뿐 아니라 로그인한 모든 사용자에게 노출한다
+  // (백엔드 PUT /api/auth/me/password는 애초부터 역할과 무관하게 본인만 바꿀 수 있었음).
+  document.getElementById("change-password-btn").hidden = false;
 
   if (isAdmin) {
     loadTenantManagement(); // 테넌트 필터 드롭다운 채우기 + 캐시
@@ -704,6 +722,9 @@ function switchAdminPage(page) {
   } else if (page === "tenants") {
     loadTenantManagement();
     if (!state.integrationAccounts.length) loadIntegrationAccounts();
+  } else if (page === "users") {
+    loadUserManagement();
+    if (!state.tenants.length) loadTenantManagement(); // 사용자 생성/수정 모달의 테넌트 선택지용
   } else if (page === "integrations") {
     loadIntegrationAccounts();
   } else if (page === "system") {
@@ -792,6 +813,214 @@ async function loadSystemStatus() {
       ? `마지막 동기화: ${fmtDateTimeKst(c.last_sync_at)} (${fmtDurationShort(c.seconds_since_last_sync)} 전) · 수집 주기 ${fmtNum(c.interval_minutes)}분`
       : `아직 한 번도 동기화되지 않았습니다 · 수집 주기 ${fmtNum(c.interval_minutes)}분`;
     summary.innerHTML = `${badges.join(" ")}<div class="muted small" style="margin-top:6px;">등록된 연동 계정 ${fmtNum(c.total_accounts)}개 · ${lastSyncLine}</div>`;
+  }
+}
+
+/* ---------------------------- 관리자 화면 - 사용자 관리 (v4.5) ---------------------------- */
+
+async function loadUserManagement() {
+  try {
+    const users = await api("/admin/users");
+    state.users = users;
+    renderUserTable(users);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function renderUserTable(users) {
+  const tbody = document.getElementById("user-table-body");
+  if (!users.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">등록된 사용자가 없습니다.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = users
+    .map(
+      (u) => `
+    <tr>
+      <td>${escapeHtml(u.email)}</td>
+      <td>${escapeHtml(u.display_name) || "-"}</td>
+      <td>${u.role === "admin" ? "관리자" : "일반 사용자"}</td>
+      <td>${u.role === "admin" ? "-" : escapeHtml(u.tenant_name) || `<span class="muted">미배정</span>`}</td>
+      <td>
+        <div class="row-actions">
+          <button class="btn btn-ghost btn-sm user-reset-btn" data-user-id="${u.id}">비밀번호 초기화</button>
+          <button class="btn btn-ghost btn-sm user-edit-btn" data-user-id="${u.id}">수정</button>
+          <button class="btn btn-ghost btn-sm danger user-delete-btn" data-user-id="${u.id}">삭제</button>
+        </div>
+      </td>
+    </tr>`
+    )
+    .join("");
+
+  tbody.querySelectorAll(".user-reset-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = state.users.find((x) => x.id === Number(btn.dataset.userId));
+      if (u) openResetPasswordModal(u);
+    });
+  });
+  tbody.querySelectorAll(".user-edit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = state.users.find((x) => x.id === Number(btn.dataset.userId));
+      if (u) openUserModal("edit", u);
+    });
+  });
+  tbody.querySelectorAll(".user-delete-btn").forEach((btn) => {
+    btn.addEventListener("click", () => onUserDelete(Number(btn.dataset.userId)));
+  });
+}
+
+// [v4.5] 생성/수정 모달의 "소속 테넌트" 드롭다운을 state.tenants(테넌트 관리 탭과 공유하는
+// 캐시)로 채운다 - 관리자가 "테넌트 관리" 탭을 먼저 들르지 않고 "사용자 관리"로 바로 오는
+// 경로도 있어(switchAdminPage), 그 경우엔 loadTenantManagement()를 먼저 호출해둔다.
+function populateUserTenantSelect(selectedTenantId) {
+  const select = document.getElementById("user-tenant-select");
+  select.innerHTML = state.tenants.length
+    ? state.tenants.map((t) => `<option value="${t.id}">${escapeHtml(t.name)} (${escapeHtml(t.key)})</option>`).join("")
+    : `<option value="">등록된 테넌트가 없습니다 - 먼저 테넌트를 만드세요</option>`;
+  if (selectedTenantId != null) select.value = String(selectedTenantId);
+}
+
+function updateUserTenantFieldVisibility() {
+  const isUserRole = document.getElementById("user-role-select").value === "user";
+  document.getElementById("user-tenant-row").hidden = !isUserRole;
+}
+
+function openUserModal(mode, user) {
+  state.userModalMode = mode;
+  state.editingUserId = user ? user.id : null;
+  document.getElementById("user-form").reset();
+  document.getElementById("user-form-error").hidden = true;
+  populateUserTenantSelect(user ? user.tenant_id : null);
+
+  const emailInput = document.getElementById("user-email-input");
+  const roleSelect = document.getElementById("user-role-select");
+  const passwordInput = document.getElementById("user-password-input");
+
+  if (mode === "create") {
+    document.getElementById("user-modal-title").textContent = "새 사용자";
+    document.getElementById("user-form-submit-btn").textContent = "생성";
+    emailInput.value = "";
+    emailInput.disabled = false;
+    roleSelect.value = "user";
+    roleSelect.disabled = false;
+    passwordInput.value = "";
+    passwordInput.required = true;
+    document.getElementById("user-password-row").hidden = false;
+    document.getElementById("user-password-hint").hidden = true;
+    document.getElementById("user-role-hint").hidden = true;
+    document.getElementById("user-name-input").value = "";
+  } else {
+    document.getElementById("user-modal-title").textContent = `사용자 수정 — ${user.email}`;
+    document.getElementById("user-form-submit-btn").textContent = "저장";
+    emailInput.value = user.email;
+    emailInput.disabled = true; // 로그인 id는 생성 후 불변으로 취급 (프로젝트 Key와 동일한 원칙)
+    roleSelect.value = user.role;
+    roleSelect.disabled = true; // 역할 전환은 이 화면 범위 밖 - user-role-hint 참고
+    passwordInput.required = false;
+    document.getElementById("user-password-row").hidden = true;
+    document.getElementById("user-password-hint").hidden = false;
+    document.getElementById("user-role-hint").hidden = false;
+    document.getElementById("user-name-input").value = user.display_name || "";
+  }
+  updateUserTenantFieldVisibility();
+  document.getElementById("user-modal").hidden = false;
+}
+
+function closeUserModal() {
+  document.getElementById("user-modal").hidden = true;
+}
+
+async function onUserFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("user-form-error");
+  errEl.hidden = true;
+  const role = document.getElementById("user-role-select").value;
+  const tenantId = document.getElementById("user-tenant-select").value;
+
+  if (role === "user" && !tenantId) {
+    errEl.textContent = "소속 테넌트를 선택하세요.";
+    errEl.hidden = false;
+    return;
+  }
+
+  if (state.userModalMode === "create") {
+    const payload = {
+      email: document.getElementById("user-email-input").value.trim(),
+      password: document.getElementById("user-password-input").value,
+      display_name: document.getElementById("user-name-input").value.trim(),
+      role,
+      tenant_id: role === "user" ? Number(tenantId) : null,
+    };
+    try {
+      await api("/admin/users", { method: "POST", body: JSON.stringify(payload) });
+      showToast("사용자 계정이 생성되었습니다.", "success");
+      closeUserModal();
+      await loadUserManagement();
+    } catch (err) {
+      errEl.textContent = err.message || "생성에 실패했습니다.";
+      errEl.hidden = false;
+    }
+  } else {
+    const payload = {
+      display_name: document.getElementById("user-name-input").value.trim(),
+      tenant_id: role === "user" ? Number(tenantId) : null,
+    };
+    try {
+      await api(`/admin/users/${state.editingUserId}`, { method: "PUT", body: JSON.stringify(payload) });
+      showToast("사용자 정보를 수정했습니다.", "success");
+      closeUserModal();
+      await loadUserManagement();
+      // 테넌트 상세 모달의 읽기 전용 사용자 목록이 열려 있었다면 함께 갱신.
+      if (state.currentTenantDetailId) await refreshTenantDetailAndList();
+    } catch (err) {
+      errEl.textContent = err.message || "수정에 실패했습니다.";
+      errEl.hidden = false;
+    }
+  }
+}
+
+async function onUserDelete(userId) {
+  if (!confirm("이 사용자 계정을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) return;
+  try {
+    await api(`/admin/users/${userId}`, { method: "DELETE" });
+    showToast("사용자 계정을 삭제했습니다.", "success");
+    await loadUserManagement();
+    if (state.currentTenantDetailId) await refreshTenantDetailAndList();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function openResetPasswordModal(user) {
+  state.resettingUserId = user.id;
+  document.getElementById("user-reset-password-target").textContent = user.email;
+  document.getElementById("user-reset-password-form").reset();
+  document.getElementById("user-reset-password-form-error").hidden = true;
+  document.getElementById("user-reset-password-modal").hidden = false;
+}
+
+function closeResetPasswordModal() {
+  document.getElementById("user-reset-password-modal").hidden = true;
+}
+
+async function onResetPasswordFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("user-reset-password-form-error");
+  const pw = document.getElementById("user-reset-password-new").value;
+  const confirmPw = document.getElementById("user-reset-password-confirm").value;
+  if (pw !== confirmPw) {
+    errEl.textContent = "새 비밀번호가 일치하지 않습니다.";
+    errEl.hidden = false;
+    return;
+  }
+  try {
+    await api(`/admin/users/${state.resettingUserId}/password`, { method: "PUT", body: JSON.stringify({ password: pw }) });
+    showToast("비밀번호를 초기화했습니다.", "success");
+    closeResetPasswordModal();
+  } catch (err) {
+    errEl.textContent = err.message || "초기화에 실패했습니다.";
+    errEl.hidden = false;
   }
 }
 
@@ -1164,9 +1393,6 @@ function renderTenantDetail(detail) {
         )
         .join("")
     : `<tr><td colspan="3" class="muted">등록된 사용자가 없습니다.</td></tr>`;
-
-  document.getElementById("tenant-user-form").reset();
-  document.getElementById("tenant-user-form-error").hidden = true;
 }
 
 async function refreshTenantDetailAndList() {
@@ -1184,27 +1410,6 @@ async function onProjectDelete(tenantId, projectId) {
     loadAdminView();
   } catch (err) {
     showToast(err.message, "error");
-  }
-}
-
-async function onTenantUserFormSubmit(e) {
-  e.preventDefault();
-  const tenantId = state.currentTenantDetailId;
-  if (!tenantId) return;
-  const payload = {
-    email: document.getElementById("tenant-user-email").value.trim(),
-    password: document.getElementById("tenant-user-password").value,
-    display_name: document.getElementById("tenant-user-name").value.trim(),
-    role: "user",
-  };
-  const errEl = document.getElementById("tenant-user-form-error");
-  try {
-    await api(`/admin/tenants/${tenantId}/users`, { method: "POST", body: JSON.stringify(payload) });
-    showToast("사용자 계정이 생성되었습니다.", "success");
-    await refreshTenantDetailAndList();
-  } catch (err) {
-    errEl.textContent = err.message || "생성에 실패했습니다.";
-    errEl.hidden = false;
   }
 }
 

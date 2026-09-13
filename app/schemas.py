@@ -252,6 +252,22 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=4)
     display_name: str = ""
     role: str = "user"  # "user" | "admin"
+    # [v4.5] POST /api/admin/users(신규, 테넌트 비종속 "사용자 관리" 화면용)에서만 쓰인다.
+    # 기존 POST /api/admin/tenants/{tenant_id}/users는 URL 경로의 tenant_id를 그대로
+    # 쓰고 이 필드는 무시한다. role="admin"이면 이 값은 무시되고 tenant_id는 항상 None.
+    tenant_id: int | None = None
+
+
+class UserAdminUpdate(BaseModel):
+    """[v4.5] "사용자 관리" 화면의 사용자 수정(표시 이름 변경 / 테넌트 재배정).
+
+    role은 이 스키마로 바꾸지 않는다(관리자<->일반 전환은 tenant_id 처리 등 파급 범위가
+    커서 이번 요청 범위 밖으로 판단, 필요시 삭제 후 재생성으로 대체). tenant_id는
+    role="user"인 계정에만 의미가 있고, role="admin" 계정에는 무시된다.
+    """
+
+    display_name: str | None = None
+    tenant_id: int | None = None
 
 
 class UserPasswordUpdate(BaseModel):
@@ -264,6 +280,8 @@ class UserAdminOut(BaseModel):
     display_name: str
     role: str
     tenant_id: int | None = None
+    tenant_key: str | None = None
+    tenant_name: str | None = None
 
     model_config = {"from_attributes": True}
 

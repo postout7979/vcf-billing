@@ -59,6 +59,7 @@ from app.schemas import (
     TenantSummaryOut,
     TenantUpdate,
     UserAdminOut,
+    UserAdminUpdate,
     UserCreate,
     UserPasswordUpdate,
     VCenterOut,
@@ -493,7 +494,15 @@ def _tenant_to_out(t: Tenant) -> TenantOut:
 
 
 def _user_to_admin_out(u: User) -> UserAdminOut:
-    return UserAdminOut(id=u.id, email=u.email, display_name=u.display_name, role=u.role.value, tenant_id=u.tenant_id)
+    return UserAdminOut(
+        id=u.id,
+        email=u.email,
+        display_name=u.display_name,
+        role=u.role.value,
+        tenant_id=u.tenant_id,
+        tenant_key=u.tenant.key if u.tenant else None,
+        tenant_name=u.tenant.name if u.tenant else None,
+    )
 
 
 def _get_tenant_or_404(db: Session, tenant_id: int) -> Tenant:
@@ -726,6 +735,59 @@ def create_tenant_user(
 @router.get("/users", response_model=list[UserAdminOut])
 def list_all_users(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[UserAdminOut]:
     return [_user_to_admin_out(u) for u in db.query(User).order_by(User.email).all()]
+
+
+@router.post("/users", response_model=UserAdminOut, status_code=status.HTTP_201_CREATED)
+def create_user(payload: UserCreate, _admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> UserAdminOut:
+    """[v4.5] "사용자 관리" 화면 전용 - 테넌트 화면을 거치지 않고 어디서든 사용자를
+    생성하며, role="user"면 payload.tenant_id로 소속 테넌트를 직접 선택한다
+    (기존 POST /tenants/{tenant_id}/users는 테넌트 상세 화면에 그대로 남아있음)."""
+    login_id = payload.email.strip().lower()
+    if db.query(User).filter_by(email=login_id).one_or_none():
+        raise HTTPException(status.HTTP_409_CONFLICT, "이미 사용 중인 이메일/아이디입니다")
+
+    try:
+        role = UserRole(payload.role)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, 'role은 "user" 또는 "admin"이어야 합니다') from exc
+
+    tenant_id: int | None = None
+    if role == UserRole.USER:
+        if payload.tenant_id is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, 'role="user"는 소속 테넌트(tenant_id)를 선택해야 합니다')
+        tenant_id = _get_tenant_or_404(db, payload.tenant_id).id
+
+    user = User(
+        email=login_id,
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name,
+        role=role,
+        tenant_id=tenant_id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return _user_to_admin_out(user)
+
+
+@router.put("/users/{user_id}", response_model=UserAdminOut)
+def update_user(
+    user_id: int, payload: UserAdminUpdate, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> UserAdminOut:
+    """[v4.5] 표시 이름 변경 및 테넌트 재배정("사용자 관리" 화면의 "수정"). role은 이
+    엔드포인트로 바꾸지 않는다 - _user_to_admin_out()의 UserAdminUpdate 스키마 설명 참고."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "사용자를 찾을 수 없습니다")
+
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip()
+    if payload.tenant_id is not None and user.role == UserRole.USER:
+        user.tenant_id = _get_tenant_or_404(db, payload.tenant_id).id
+
+    db.commit()
+    db.refresh(user)
+    return _user_to_admin_out(user)
 
 
 @router.put(
