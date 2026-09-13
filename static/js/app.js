@@ -383,6 +383,13 @@ async function boot() {
   document.getElementById("user-reset-password-cancel-btn").addEventListener("click", closeResetPasswordModal);
   document.getElementById("user-reset-password-form").addEventListener("submit", onResetPasswordFormSubmit);
 
+  // [v4.6] 데이터베이스
+  document.getElementById("database-refresh-btn").addEventListener("click", loadDatabaseOverview);
+  document.getElementById("database-export-btn").addEventListener("click", onDatabaseExport);
+  document.getElementById("external-db-test-btn").addEventListener("click", onExternalDbTest);
+  document.getElementById("external-db-form").addEventListener("submit", onExternalDbMigrateSubmit);
+  document.getElementById("external-db-migrate-copy-btn").addEventListener("click", onCopyExternalDbUrl);
+
   if (state.token) {
     try {
       state.user = await api("/auth/me");
@@ -730,6 +737,8 @@ function switchAdminPage(page) {
   } else if (page === "system") {
     loadSystemStatus();
     startSystemStatusAutoRefresh();
+  } else if (page === "database") {
+    loadDatabaseOverview();
   }
 }
 
@@ -813,6 +822,143 @@ async function loadSystemStatus() {
       ? `마지막 동기화: ${fmtDateTimeKst(c.last_sync_at)} (${fmtDurationShort(c.seconds_since_last_sync)} 전) · 수집 주기 ${fmtNum(c.interval_minutes)}분`
       : `아직 한 번도 동기화되지 않았습니다 · 수집 주기 ${fmtNum(c.interval_minutes)}분`;
     summary.innerHTML = `${badges.join(" ")}<div class="muted small" style="margin-top:6px;">등록된 연동 계정 ${fmtNum(c.total_accounts)}개 · ${lastSyncLine}</div>`;
+  }
+}
+
+/* ---------------------------- 관리자 화면 - 데이터베이스 (v4.6) ---------------------------- */
+
+async function loadDatabaseOverview() {
+  let data;
+  try {
+    data = await api("/admin/database");
+  } catch (err) {
+    showToast(err.message, "error");
+    return;
+  }
+
+  const connLabel =
+    data.engine === "sqlite"
+      ? `파일: ${data.file_path || "-"}`
+      : `${data.host}:${data.port} / DB: ${data.database} / 사용자: ${data.username}`;
+
+  renderKpiGrid(document.getElementById("database-current-kpis"), [
+    { label: "엔진", value: data.engine === "postgresql" ? "PostgreSQL" : "SQLite", sub: data.server_version || "", highlight: true },
+    { label: "전체 크기", value: fmtBytes(data.size_bytes), sub: "" },
+    { label: "연결 정보", value: connLabel, sub: "" },
+  ]);
+
+  const tbody = document.getElementById("database-table-body");
+  tbody.innerHTML = data.tables
+    .map(
+      (t) => `
+    <tr>
+      <td><code>${escapeHtml(t.name)}</code></td>
+      <td>${fmtNum(t.row_count)}</td>
+      <td>${fmtBytes(t.size_bytes)}</td>
+    </tr>`
+    )
+    .join("");
+}
+
+async function onDatabaseExport() {
+  const btn = document.getElementById("database-export-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "내보내는 중...";
+  try {
+    // downloadPdf()는 이름과 달리 인증 헤더를 붙여 파일을 받아 다운로드시키는 범용
+    // 헬퍼라(v3 이후 PDF 결산서 전용으로 쓰여왔음), DB 백업 파일에도 그대로 재사용한다.
+    await downloadPdf("/admin/database/export", "vcf-billing-backup");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+function _collectExternalDbForm() {
+  return {
+    host: document.getElementById("external-db-host").value.trim(),
+    port: Number(document.getElementById("external-db-port").value) || 5432,
+    database: document.getElementById("external-db-database").value.trim(),
+    username: document.getElementById("external-db-username").value.trim(),
+    password: document.getElementById("external-db-password").value,
+    sslmode: document.getElementById("external-db-sslmode").value,
+  };
+}
+
+async function onExternalDbTest() {
+  const resultEl = document.getElementById("external-db-test-result");
+  const errEl = document.getElementById("external-db-form-error");
+  errEl.hidden = true;
+  const btn = document.getElementById("external-db-test-btn");
+  btn.disabled = true;
+  resultEl.hidden = true;
+  try {
+    const result = await api("/admin/database/test-connection", {
+      method: "POST",
+      body: JSON.stringify(_collectExternalDbForm()),
+    });
+    resultEl.className = result.ok ? "form-note success" : "form-note error";
+    resultEl.textContent = result.ok ? `✓ 연결 성공 (${result.server_version || ""})` : `✗ 연결 실패: ${result.message}`;
+    resultEl.hidden = false;
+  } catch (err) {
+    errEl.textContent = err.message || "연결 테스트에 실패했습니다.";
+    errEl.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function onExternalDbMigrateSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("external-db-form-error");
+  errEl.hidden = true;
+
+  if (
+    !confirm(
+      "대상 PostgreSQL DB로 현재 데이터 전체를 복사합니다. 대상 DB는 반드시 비어 있어야 하며, " +
+        "이 작업만으로는 앱이 실제로 그 DB를 쓰도록 전환되지 않습니다(안내에 따라 별도로 .env를 " +
+        "바꾸고 컨테이너를 재시작해야 합니다). 계속하시겠습니까?"
+    )
+  ) {
+    return;
+  }
+
+  const btn = document.getElementById("external-db-migrate-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "마이그레이션 중...";
+  try {
+    const payload = { ..._collectExternalDbForm(), confirm: true };
+    const result = await api("/admin/database/migrate", { method: "POST", body: JSON.stringify(payload) });
+
+    document.getElementById("external-db-migrate-message").textContent = result.message;
+    document.getElementById("external-db-migrate-table-body").innerHTML = result.tables
+      .map((t) => `<tr><td><code>${escapeHtml(t.name)}</code></td><td>${fmtNum(t.rows)}</td></tr>`)
+      .join("");
+    document.getElementById("external-db-migrate-url").value = result.database_url || "";
+    document.getElementById("external-db-migrate-steps").innerHTML = result.next_steps
+      .map((step) => `<li>${escapeHtml(step)}</li>`)
+      .join("");
+    document.getElementById("external-db-migrate-result").hidden = false;
+    showToast("마이그레이션이 완료되었습니다.", "success");
+  } catch (err) {
+    errEl.textContent = err.message || "마이그레이션에 실패했습니다.";
+    errEl.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function onCopyExternalDbUrl() {
+  const input = document.getElementById("external-db-migrate-url");
+  try {
+    await navigator.clipboard.writeText(input.value);
+    showToast("클립보드에 복사했습니다.", "success");
+  } catch (_) {
+    input.select();
+    showToast("자동 복사에 실패했습니다 - 직접 선택해 복사해주세요.", "error");
   }
 }
 

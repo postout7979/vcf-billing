@@ -64,12 +64,18 @@ def migrate(sqlite_path: str, postgres_url: str) -> None:
             print(f"  - {table.name}: {len(rows)}행 이관 완료")
 
             # id 컬럼(PK, autoincrement)이 있으면 시퀀스를 재조정한다.
-            pk_cols = [c for c in table.primary_key.columns if c.autoincrement]
-            for col in pk_cols:
-                seq_name = f"{table.name}_{col.name}_seq"
+            # [v4.6] `col.autoincrement`는 실제 bool이 아니라 대개 문자열 "auto"라
+            # (SQLAlchemy의 지연 판정 방식) `if c.autoincrement`처럼 그대로 쓰면
+            # project_tag_link 같은 복합 PK(둘 다 FK)인 M2M 연결 테이블까지 "시퀀스
+            # 있음"으로 오판해 존재하지 않는 시퀀스에 setval을 시도하다 실패한다.
+            # `table._autoincrement_column`은 SQLAlchemy가 실제로 시퀀스/SERIAL을
+            # 붙이는 단일 컬럼(단순 정수 단독 PK인 경우만)만 정확히 알려준다.
+            auto_col = table._autoincrement_column
+            if auto_col is not None:
+                seq_name = f"{table.name}_{auto_col.name}_seq"
                 dst.execute(
                     text(
-                        f"SELECT setval('{seq_name}', COALESCE((SELECT MAX({col.name}) FROM {table.name}), 1), true)"
+                        f"SELECT setval('{seq_name}', COALESCE((SELECT MAX({auto_col.name}) FROM {table.name}), 1), true)"
                     )
                 )
 

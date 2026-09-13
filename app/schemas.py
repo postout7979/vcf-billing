@@ -423,3 +423,70 @@ class SystemStatusOut(BaseModel):
     db: DbStatusOut
     api_process: ApiProcessStatusOut
     collector: CollectorStatusOut
+
+
+# [v4.6] "데이터베이스" 관리자 메뉴 - 현재 DB 정보 조회 + 외부 PostgreSQL 연결
+# 테스트/마이그레이션 + DB 내보내기(백업). app/db_admin.py 참고.
+
+
+class DatabaseTableStatOut(BaseModel):
+    name: str
+    row_count: int
+    size_bytes: int | None = None
+
+
+class DatabaseOverviewOut(BaseModel):
+    """현재 이 애플리케이션이 실제로 연결해 쓰고 있는 DB의 정보.
+
+    PostgreSQL이면 host/port/database/username이 채워지고 file_path는 None,
+    SQLite 폴백이면 반대로 file_path만 채워진다(로컬 파일이라 접속 정보 개념이 없음).
+    """
+
+    engine: str  # "postgresql" | "sqlite"
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    file_path: str | None = None
+    server_version: str | None = None
+    size_bytes: int | None = None
+    tables: list[DatabaseTableStatOut]
+
+
+class ExternalDbConnectionRequest(BaseModel):
+    """관리자가 "외부 PostgreSQL 연결" 폼에 입력하는 접속 정보 (연결 테스트/마이그레이션 공용)."""
+
+    host: str = Field(min_length=1)
+    port: int = Field(default=5432, ge=1, le=65535)
+    database: str = Field(min_length=1)
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    sslmode: str = "prefer"  # disable|allow|prefer|require|verify-ca|verify-full
+
+
+class ExternalDbTestResult(BaseModel):
+    ok: bool
+    message: str
+    server_version: str | None = None
+
+
+class ExternalDbMigrateRequest(ExternalDbConnectionRequest):
+    # 실수로 호출되는 것을 막기 위한 명시적 확인 플래그 - 프론트엔드가 체크박스+confirm()
+    # 다이얼로그를 거친 뒤에만 true로 보낸다. false/누락 시 400.
+    confirm: bool = False
+
+
+class ExternalDbTableResult(BaseModel):
+    name: str
+    rows: int
+
+
+class ExternalDbMigrateResult(BaseModel):
+    ok: bool
+    message: str
+    tables: list[ExternalDbTableResult] = []
+    # 관리자가 .env에 그대로 붙여넣을 수 있는 완전한 접속 문자열(비밀번호 포함) - 응답
+    # 한 번에만 내려주고 서버 어디에도 저장/로그하지 않는다.
+    database_url: str | None = None
+    database_url_masked: str | None = None
+    next_steps: list[str] = []

@@ -221,6 +221,20 @@ select:focus, input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
   border-radius: var(--radius-sm);
 }
 
+/* [v4.6] 연결 테스트 결과처럼 성공/실패 두 상태를 모두 표시해야 하는 안내 문구 */
+.form-note {
+  margin-top: 10px;
+  font-size: 12.5px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+}
+.form-note.success { color: var(--success); background: var(--teal-tint); }
+.form-note.error { color: var(--danger); background: var(--danger-tint); }
+
+/* [v4.6] "새 DATABASE_URL" 같은 값 옆에 복사 버튼을 붙이는 행 */
+.copy-row { display: flex; gap: 8px; }
+.copy-row input { flex: 1; }
+
 /* ---------- 로그인 ---------- */
 .login-card { width: 400px; max-width: 100%; padding: 28px 26px 22px; }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }

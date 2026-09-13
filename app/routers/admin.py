@@ -22,6 +22,13 @@ from app.billing.aggregator import (
 from app.billing.statement_pdf import build_project_statement_pdf
 from app.collector import recompute_project_assignments, sync_account_once
 from app.database import get_db
+from app.db_admin import (
+    ExternalDbNotEmptyError,
+    export_database_bytes,
+    get_database_overview,
+    migrate_to_external_postgres,
+    test_external_connection,
+)
 from app.models import (
     Cluster,
     IntegrationAccount,
@@ -40,7 +47,12 @@ from app.routers.common import parse_month_param, parse_period, project_to_out, 
 from app.schemas import (
     AdminOverviewOut,
     ClusterOut,
+    DatabaseOverviewOut,
     DatacenterOut,
+    ExternalDbConnectionRequest,
+    ExternalDbMigrateRequest,
+    ExternalDbMigrateResult,
+    ExternalDbTestResult,
     IntegrationAccountCreate,
     IntegrationAccountOut,
     IntegrationAccountUpdate,
@@ -79,6 +91,50 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 @router.get("/system-status", response_model=SystemStatusOut)
 def system_status(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> SystemStatusOut:
     return get_system_status(db)
+
+
+# ==========================================================================
+# [v4.6] 데이터베이스 (현재 DB 정보 / 외부 PostgreSQL 연결 테스트·마이그레이션 / 내보내기)
+# ==========================================================================
+
+
+@router.get("/database", response_model=DatabaseOverviewOut)
+def database_overview(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> DatabaseOverviewOut:
+    return get_database_overview(db)
+
+
+@router.post("/database/test-connection", response_model=ExternalDbTestResult)
+def database_test_connection(
+    payload: ExternalDbConnectionRequest, _admin: User = Depends(require_admin)
+) -> ExternalDbTestResult:
+    return test_external_connection(payload)
+
+
+@router.post("/database/migrate", response_model=ExternalDbMigrateResult)
+def database_migrate(
+    payload: ExternalDbMigrateRequest, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> ExternalDbMigrateResult:
+    if not payload.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 마이그레이션이 실행됩니다")
+    try:
+        return migrate_to_external_postgres(db, payload)
+    except ExternalDbNotEmptyError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - 접속/네트워크 등 다양한 원인을 그대로 안내
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"마이그레이션 실패: {exc}") from exc
+
+
+@router.get("/database/export")
+def database_export(_admin: User = Depends(require_admin)) -> Response:
+    try:
+        data, filename, media_type = export_database_bytes()
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ==========================================================================
