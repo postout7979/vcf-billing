@@ -358,3 +358,50 @@ class AdminOverviewOut(BaseModel):
     currency_note: str
     projects: list[ProjectUsageOut]
     tenant_summaries: list[TenantSummaryOut] = []
+
+
+class DbTableStatOut(BaseModel):
+    """[v4.4] "시스템 상태" 화면의 테이블별 크기/행수 (주요 테이블만)."""
+
+    name: str
+    row_count: int
+    size_bytes: int | None = None  # PostgreSQL에서만 제공 (SQLite 폴백은 None)
+
+
+class DbStatusOut(BaseModel):
+    engine: str  # "postgresql" | "sqlite"
+    size_bytes: int | None = None
+    active_connections: int | None = None
+    tables: list[DbTableStatOut]
+    oldest_usage_sample_at: dt.datetime | None = None
+    newest_usage_sample_at: dt.datetime | None = None
+
+
+class ApiProcessStatusOut(BaseModel):
+    """[v4.4] api 컨테이너 자기 자신의 프로세스 상태.
+
+    collector/frontend/db 컨테이너는 도커 소켓 없이는 조회할 수 없어 포함하지 않는다
+    (design.md "v4.4 개편" 참고).
+    """
+
+    cpu_percent: float
+    memory_rss_mb: float
+    uptime_seconds: float
+
+
+class CollectorStatusOut(BaseModel):
+    """[v4.4] 등록된 연동 계정들의 last_sync_* 필드를 집계한, 수집기 동작 여부의 간접 지표."""
+
+    interval_minutes: int
+    total_accounts: int
+    accounts_never_synced: int
+    accounts_with_error: int
+    last_sync_at: dt.datetime | None = None
+    seconds_since_last_sync: float | None = None
+
+
+class SystemStatusOut(BaseModel):
+    generated_at: dt.datetime
+    db: DbStatusOut
+    api_process: ApiProcessStatusOut
+    collector: CollectorStatusOut

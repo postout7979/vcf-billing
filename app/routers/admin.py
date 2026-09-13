@@ -51,6 +51,7 @@ from app.schemas import (
     ProjectUpdate,
     ProjectUsageOut,
     RateCardUpdate,
+    SystemStatusOut,
     TagOut,
     TenantCreate,
     TenantDetailOut,
@@ -64,8 +65,19 @@ from app.schemas import (
     VMFolderOut,
 )
 from app.security.crypto import encrypt_secret
+from app.system_status import get_system_status
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+# ==========================================================================
+# [v4.4] 시스템 상태 (DB 사용량 / API 프로세스 리소스 / 수집기 동작 현황)
+# ==========================================================================
+
+
+@router.get("/system-status", response_model=SystemStatusOut)
+def system_status(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> SystemStatusOut:
+    return get_system_status(db)
 
 
 # ==========================================================================

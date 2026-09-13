@@ -15,7 +15,8 @@ const state = {
   charts: {},
   overview: null, // 현재 화면(관리자 또는 사용자)에 표시 중인 AdminOverviewOut 형태 응답
   adminTenantFilter: "", // 관리자 화면의 테넌트 필터. "" = 전체(교차 확인)
-  adminPage: "overview", // 관리자 메뉴 현재 탭: overview | tenants | integrations
+  adminPage: "overview", // 관리자 메뉴 현재 탭: overview | tenants | integrations | system
+  systemStatusTimer: null, // [v4.4] "시스템 상태" 탭이 열려 있는 동안만 도는 30초 자동 새로고침 타이머
   tenants: [], // 관리자: 테넌트 목록 캐시
   currentTenantDetailId: null, // 관리자: 현재 열려 있는 테넌트 상세 관리 패널의 테넌트 id
   integrationAccounts: [], // 관리자: 연동 계정 목록 캐시
@@ -133,6 +134,32 @@ function fmtHoursMinutes(hours) {
   return `${fmtNum(h)}h ${m}m`;
 }
 
+// [v4.4] "시스템 상태" 화면용 - 바이트를 사람이 읽기 좋은 단위로.
+function fmtBytes(bytes) {
+  if (bytes == null) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Math.max(bytes, 0);
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+// [v4.4] 초 단위 시간을 "X일 Y시간" 처럼 큰 단위 위주로 축약 표시 (가동시간/경과시간용).
+function fmtDurationShort(seconds) {
+  if (seconds == null) return "-";
+  const s = Math.max(Math.round(seconds), 0);
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days}일 ${hours}시간`;
+  if (hours > 0) return `${hours}시간 ${minutes}분`;
+  if (minutes > 0) return `${minutes}분`;
+  return `${s}초`;
+}
+
 function fmtDateKst(isoString) {
   const d = new Date(isoString);
   return d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" });
@@ -219,6 +246,7 @@ function saveSession(token, user) {
 function doLogout() {
   state.token = null;
   state.user = null;
+  stopSystemStatusAutoRefresh(); // [v4.4] 로그아웃 후에도 타이머가 살아남아 401 토스트를 계속 띄우는 것을 방지
   localStorage.removeItem("vcf_billing_token");
   document.getElementById("app-shell").hidden = true;
   document.getElementById("view-login").hidden = false;
@@ -335,6 +363,9 @@ async function boot() {
     document.getElementById("inventory-panel").hidden = true;
     state.currentInventoryAccountId = null;
   });
+
+  // [v4.4] 시스템 상태
+  document.getElementById("system-status-refresh-btn").addEventListener("click", loadSystemStatus);
 
   if (state.token) {
     try {
@@ -664,6 +695,10 @@ function switchAdminPage(page) {
   document.querySelectorAll(".admin-page").forEach((sec) => {
     sec.hidden = sec.id !== `admin-page-${page}`;
   });
+  // [v4.4] "시스템 상태" 탭에서 다른 탭으로 이동하면 자동 새로고침 타이머부터 정리한다 -
+  // 안 그러면 화면에 보이지도 않는 탭을 위해 30초마다 불필요한 API 호출이 계속 나간다.
+  if (page !== "system") stopSystemStatusAutoRefresh();
+
   if (page === "overview") {
     loadAdminView();
   } else if (page === "tenants") {
@@ -671,6 +706,92 @@ function switchAdminPage(page) {
     if (!state.integrationAccounts.length) loadIntegrationAccounts();
   } else if (page === "integrations") {
     loadIntegrationAccounts();
+  } else if (page === "system") {
+    loadSystemStatus();
+    startSystemStatusAutoRefresh();
+  }
+}
+
+/* ---------------------------- 관리자 화면 - 시스템 상태 (v4.4) ---------------------------- */
+
+function startSystemStatusAutoRefresh() {
+  stopSystemStatusAutoRefresh();
+  state.systemStatusTimer = setInterval(() => {
+    // 그 사이 다른 탭으로 넘어갔다면(방어적 이중 체크) 조용히 멈춘다.
+    if (state.adminPage !== "system") {
+      stopSystemStatusAutoRefresh();
+      return;
+    }
+    loadSystemStatus();
+  }, 30000);
+}
+
+function stopSystemStatusAutoRefresh() {
+  if (state.systemStatusTimer) {
+    clearInterval(state.systemStatusTimer);
+    state.systemStatusTimer = null;
+  }
+}
+
+async function loadSystemStatus() {
+  let data;
+  try {
+    data = await api("/admin/system-status");
+  } catch (err) {
+    showToast(err.message, "error");
+    return;
+  }
+
+  const dbEngineLabel = data.db.engine === "postgresql" ? "PostgreSQL" : "SQLite";
+  const connLabel = data.db.active_connections == null ? "" : ` · 활성 커넥션 ${fmtNum(data.db.active_connections)}개`;
+
+  renderKpiGrid(document.getElementById("system-status-kpis"), [
+    { label: "DB 전체 크기", value: fmtBytes(data.db.size_bytes), sub: `${dbEngineLabel}${connLabel}`, highlight: true },
+    { label: "API 프로세스 메모리", value: `${fmtNum(Math.round(data.api_process.memory_rss_mb))} MB`, sub: "api 컨테이너 자기 자신" },
+    { label: "API 프로세스 CPU", value: `${data.api_process.cpu_percent.toFixed(1)}%`, sub: "직전 측정 구간 평균" },
+    { label: "API 프로세스 가동시간", value: fmtDurationShort(data.api_process.uptime_seconds), sub: "마지막 재시작 이후" },
+  ]);
+
+  const tbody = document.getElementById("system-status-table-body");
+  tbody.innerHTML = data.db.tables
+    .map(
+      (t) => `
+    <tr>
+      <td><code>${escapeHtml(t.name)}</code></td>
+      <td>${fmtNum(t.row_count)}</td>
+      <td>${fmtBytes(t.size_bytes)}</td>
+    </tr>`
+    )
+    .join("");
+
+  const dbNote = document.getElementById("system-status-db-note");
+  if (data.db.newest_usage_sample_at) {
+    dbNote.textContent =
+      `사용량 데이터(power_samples) 보관 기간: ${fmtDateTimeKst(data.db.oldest_usage_sample_at)} ~ ${fmtDateTimeKst(data.db.newest_usage_sample_at)}` +
+      (data.db.engine === "sqlite" ? " · SQLite 폴백 사용 중 - 테이블별 크기는 지원되지 않아 행 수만 표시합니다." : "");
+  } else {
+    dbNote.textContent = "아직 적재된 사용량 데이터(power_samples)가 없습니다.";
+  }
+
+  const c = data.collector;
+  const summary = document.getElementById("system-status-collector-summary");
+  if (c.total_accounts === 0) {
+    summary.innerHTML = `<span class="status-badge status-pending">등록된 연동 계정 없음</span>`;
+  } else {
+    const badges = [];
+    if (c.accounts_with_error > 0) {
+      badges.push(`<span class="status-badge status-error">✗ 연동 실패 ${fmtNum(c.accounts_with_error)}건</span>`);
+    }
+    if (c.accounts_never_synced > 0) {
+      badges.push(`<span class="status-badge status-pending">동기화 대기 ${fmtNum(c.accounts_never_synced)}건</span>`);
+    }
+    if (c.accounts_with_error === 0 && c.accounts_never_synced === 0) {
+      badges.push(`<span class="status-badge status-ok">✓ 전체 정상</span>`);
+    }
+    const lastSyncLine = c.last_sync_at
+      ? `마지막 동기화: ${fmtDateTimeKst(c.last_sync_at)} (${fmtDurationShort(c.seconds_since_last_sync)} 전) · 수집 주기 ${fmtNum(c.interval_minutes)}분`
+      : `아직 한 번도 동기화되지 않았습니다 · 수집 주기 ${fmtNum(c.interval_minutes)}분`;
+    summary.innerHTML = `${badges.join(" ")}<div class="muted small" style="margin-top:6px;">등록된 연동 계정 ${fmtNum(c.total_accounts)}개 · ${lastSyncLine}</div>`;
   }
 }
 

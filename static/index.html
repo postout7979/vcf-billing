@@ -123,6 +123,7 @@
       <button class="admin-nav-btn active" data-admin-page="overview">개요</button>
       <button class="admin-nav-btn" data-admin-page="tenants">테넌트 관리</button>
       <button class="admin-nav-btn" data-admin-page="integrations">계정 연동</button>
+      <button class="admin-nav-btn" data-admin-page="system">시스템 상태</button>
     </nav>
 
     <!-- -------- 개요 -------- -->
@@ -259,6 +260,44 @@
             <tbody id="account-table-body"></tbody>
           </table>
         </div>
+      </section>
+    </section>
+
+    <!-- [v4.4] 시스템 상태: DB 사용량 + api 프로세스 자체 리소스 + 수집기 동작 현황 -->
+    <section id="admin-page-system" class="admin-page" hidden>
+      <div class="page-head">
+        <div>
+          <h2>시스템 상태</h2>
+          <p class="muted">데이터베이스 사용량과 이 애플리케이션(api 프로세스)이 소비하는 리소스, 수집기(collector) 동작 현황을 보여줍니다. 30초마다 자동으로 갱신됩니다.</p>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="system-status-refresh-btn">새로고침</button>
+      </div>
+
+      <div id="system-status-kpis" class="kpi-grid"></div>
+
+      <section class="card table-card">
+        <div class="page-head" style="margin-bottom: 8px;">
+          <h3 style="margin:0;">데이터베이스 테이블별 사용량</h3>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>테이블</th>
+                <th>행 수</th>
+                <th>크기</th>
+              </tr>
+            </thead>
+            <tbody id="system-status-table-body"></tbody>
+          </table>
+        </div>
+        <p id="system-status-db-note" class="muted small" style="margin-top: 8px;"></p>
+      </section>
+
+      <section class="card">
+        <h3 style="margin-top:0;">수집기(collector) 상태</h3>
+        <p id="system-status-collector-summary" class="muted"></p>
+        <p class="muted small">collector는 별도 컨테이너로 동작하며, 이 화면은 등록된 연동 계정들의 마지막 동기화 기록을 집계해 간접적으로 보여주는 것입니다. 연동 계정별 상세 상태는 "계정 연동" 메뉴를 참고하세요.</p>
       </section>
     </section>
   </main>

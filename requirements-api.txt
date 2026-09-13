@@ -14,3 +14,8 @@ reportlab>=4.2,<6.0
 bcrypt>=4.0,<5.0
 cryptography>=41,<44
 psycopg[binary]>=3.1,<4.0
+# [v4.4] "시스템 상태" 화면(API 프로세스 자체의 CPU/메모리/가동시간)용. api 컨테이너
+# 자기 자신의 프로세스만 조회하며, 다른 컨테이너(collector/frontend/db)의 자원은
+# 도커 소켓 마운트 없이는 조회할 수 없어 대상이 아니다 - claude/vcf-billing-portal-design.md
+# "v4.4 개편" 섹션의 한계 참고.
+psutil>=6.0,<7.0
