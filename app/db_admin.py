@@ -29,13 +29,16 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from psycopg import sql as pg_sql
 from sqlalchemy import create_engine, func, insert, select, text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.orm import Session
 
+from app.bootstrap_db import DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD, ensure_default_admin
 from app.config import get_settings
-from app.database import Base
+from app.database import Base, SessionLocal, engine as default_engine
 import app.models  # noqa: F401  (Base.metadata에 전체 테이블을 등록시키기 위한 import)
+from app.models import AppState
 from app.schemas import (
     DatabaseOverviewOut,
     DatabaseTableStatOut,
@@ -44,6 +47,8 @@ from app.schemas import (
     ExternalDbMigrateResult,
     ExternalDbTableResult,
     ExternalDbTestResult,
+    LocalDbSetupRequest,
+    LocalDbSetupResult,
 )
 
 
@@ -244,3 +249,137 @@ def export_database_bytes() -> tuple[bytes, str, str]:
             raise RuntimeError(f"pg_dump 실패: {proc.stderr.strip()[-2000:]}")
         data = out_path.read_bytes()
     return data, f"vcf-billing-postgres-backup-{timestamp}.sql", "application/sql"
+
+
+# ==========================================================================
+# [v4.8] 최초 로그인 DB 설정 게이트
+#
+# 배경(설계 결정, claude/vcf-billing-portal-design.md "v4.8 개편" 참고): "로그인 전에
+# DB를 고른다"는 문자 그대로는 불가능하다 - app/bootstrap_db.py의 bootstrap()이
+# migrate 컨테이너에서 로그인 화면이 뜨기 전에 이미 DATABASE_URL로 접속해 스키마 생성
+# +기본 admin 계정 보장까지 끝내기 때문이다(로그인 자체가 이미 연결된 DB를 전제로
+# 함). 그래서 "admin이 최초 로그인한 직후" 뜨는 1회성 안내 팝업으로 근사한다: 이미
+# 연결된 로컬 DB를 계속 쓸지, 아니면 외부 PostgreSQL로 옮길지(외부 DB 연동은 기존
+# v4.6 "외부 PostgreSQL 연결" 화면으로 안내) 고르게 하고, "로컬 DB 계속 사용"을
+# 고르면 그 자리에서 DB 계정 비밀번호를 정의(+선택적으로 기존 데이터 전체 초기화)할
+# 수 있게 한다.
+# ==========================================================================
+
+
+def get_setup_status(db: Session) -> bool:
+    state = db.get(AppState, 1)
+    return bool(state.initial_db_setup_seen) if state is not None else False
+
+
+def mark_setup_seen(db: Session) -> None:
+    state = db.get(AppState, 1)
+    if state is None:
+        db.add(AppState(id=1, initial_db_setup_seen=True))
+    else:
+        state.initial_db_setup_seen = True
+    db.commit()
+
+
+class LocalDbSetupError(ValueError):
+    """로컬 DB 설정 처리 중 사용자에게 그대로 보여줄 수 있는(요청이 잘못된) 오류."""
+
+
+def _alter_role_password(target_engine: Engine, username: str, new_password: str) -> None:
+    """PostgreSQL 로그인 역할(ROLE)의 비밀번호를 바꾼다.
+
+    psycopg3의 sql.Identifier/sql.Literal로 식별자(계정명)와 리터럴(새 비밀번호)을
+    합성해 SQL 인젝션 위험 없이 안전하게 조립한다. ALTER ROLE 같은 DDL 유틸리티
+    구문은 SQLAlchemy의 text() 바인드 파라미터로 안정적으로 표현되지 않으므로,
+    engine.raw_connection()으로 실제 psycopg3 DBAPI 커넥션/커서를 직접 사용한다.
+    """
+    raw_conn = target_engine.raw_connection()
+    try:
+        cur = raw_conn.cursor()
+        try:
+            cur.execute(
+                pg_sql.SQL("ALTER ROLE {} WITH PASSWORD {}").format(
+                    pg_sql.Identifier(username), pg_sql.Literal(new_password)
+                )
+            )
+        finally:
+            cur.close()
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def apply_local_db_setup(db: Session, req: LocalDbSetupRequest) -> LocalDbSetupResult:
+    """"로컬 DB 계속 사용" 선택 후 제출한 폼을 처리한다.
+
+    - wipe_data=False (기본, 안전 경로): DB 계정 비밀번호만 변경. 기존 VM/요금
+      데이터는 전혀 건드리지 않는다. SQLite는 애초에 "DB 계정"이라는 개념이 없어
+      (파일 하나가 DB 전체) 이 경로 자체가 의미가 없으므로 명시적으로 거부한다.
+    - wipe_data=True (파괴적 경로): 위 비밀번호 변경(PostgreSQL일 때만)에 더해 모든
+      테이블을 drop 후 재생성하고 기본 admin 계정을 다시 만든다. SQLite에서도 이
+      경로는 유효하다(파일을 통째로 비우는 것과 같은 효과) - 다만 바꿀 "계정
+      비밀번호"가 없으므로 new_password 값은 무시된다.
+    """
+    settings = get_settings()
+    is_sqlite = _is_sqlite_url(settings.database_url)
+
+    if req.wipe_data and not req.confirm_wipe:
+        raise LocalDbSetupError(
+            "전체 초기화(기존 VM/요금 데이터 삭제)를 실행하려면 confirm_wipe=true로 별도 확인해야 합니다"
+        )
+    if is_sqlite and not req.wipe_data:
+        raise LocalDbSetupError(
+            "SQLite 로컬 파일 DB에는 별도 계정 비밀번호 개념이 없습니다 - 비밀번호만 변경하는 "
+            "옵션은 PostgreSQL을 사용할 때만 의미가 있습니다. 데이터를 지우고 다시 시작하려면 "
+            "'전체 초기화' 옵션을 선택하세요."
+        )
+
+    password_changed = False
+    if not is_sqlite:
+        url = make_url(settings.database_url)
+        if not url.username:
+            raise LocalDbSetupError("현재 DB 접속 정보에서 계정명을 확인할 수 없습니다")
+        _alter_role_password(default_engine, url.username, req.new_password)
+        password_changed = True
+
+    wiped = False
+    if req.wipe_data:
+        # DROP/CREATE 같은 스키마 전체를 건드리는 DDL 전에, 이 요청이 들고 온 세션이
+        # 잡고 있던 트랜잭션/커넥션을 먼저 반납한다 - 그대로 두면 지금 로그인해 있는
+        # admin 자신의 행이 지워지는 도중에 같은 세션이 이전 상태를 참조하게 되어
+        # PostgreSQL에서는 잠금 충돌이, SQLite에서는 파일 잠금 문제가 생길 수 있다.
+        db.close()
+        Base.metadata.drop_all(bind=default_engine)
+        Base.metadata.create_all(bind=default_engine)
+        ensure_default_admin()
+        wiped = True
+
+    # setup-status 플래그는 항상 새 세션으로 기록한다 - wipe 경로에서는 위 db가 이미
+    # close()되어 더 이상 재사용할 수 없기 때문에 매번 새로 연다.
+    fresh_db = SessionLocal()
+    try:
+        mark_setup_seen(fresh_db)
+    finally:
+        fresh_db.close()
+
+    reconnect_hint = (
+        ".env 파일의 DATABASE_URL에 새 비밀번호를 반영한 뒤 docker compose up -d "
+        "--force-recreate migrate api collector 로 재기동하세요 - 그렇지 않으면 다음 재기동 시"
+        "API/Collector가 이전 비밀번호로 접속을 시도해 실패합니다."
+    )
+
+    next_steps: list[str] = []
+    if wiped:
+        message = "로컬 DB를 초기화했습니다. 기존 VM/요금 데이터가 모두 삭제되고 스키마가 새로 생성되었습니다."
+        if password_changed:
+            message += " DB 계정 비밀번호도 변경했습니다."
+        next_steps.append(
+            f"기본 관리자 계정({DEFAULT_ADMIN_EMAIL} / {DEFAULT_ADMIN_PASSWORD})으로 다시 로그인하세요 - "
+            "기존 계정이 모두 삭제되었으므로 지금 로그인 세션은 곧바로 무효화됩니다."
+        )
+        if password_changed:
+            next_steps.append(reconnect_hint)
+    else:
+        message = "DB 계정 비밀번호를 변경했습니다. 기존 VM/요금 데이터는 그대로 유지됩니다."
+        next_steps.append(reconnect_hint)
+
+    return LocalDbSetupResult(ok=True, wiped=wiped, message=message, next_steps=next_steps)

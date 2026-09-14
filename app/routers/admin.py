@@ -26,8 +26,12 @@ from app.collector import recompute_project_assignments, sync_account_once
 from app.database import get_db
 from app.db_admin import (
     ExternalDbNotEmptyError,
+    LocalDbSetupError,
+    apply_local_db_setup,
     export_database_bytes,
     get_database_overview,
+    get_setup_status,
+    mark_setup_seen,
     migrate_to_external_postgres,
     test_external_connection,
 )
@@ -60,12 +64,15 @@ from app.schemas import (
     IntegrationAccountUpdate,
     IntegrationInventoryOut,
     IntegrationSyncOut,
+    LocalDbSetupRequest,
+    LocalDbSetupResult,
     MonthForecastOut,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
     ProjectUsageOut,
     RateCardUpdate,
+    SetupStatusOut,
     SystemStatusOut,
     TagOut,
     TenantCreate,
@@ -138,6 +145,50 @@ def database_export(_admin: User = Depends(require_admin)) -> Response:
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ==========================================================================
+# [v4.8] 최초 로그인 DB 설정 게이트 (로컬 DB 계속 사용 / 외부 DB 연동 안내 + 로컬 DB
+# 계정 비밀번호 변경/전체 초기화) - "데이터베이스" 개편 배경은 app/db_admin.py 상단
+# 주석 및 claude/vcf-billing-portal-design.md "v4.8 개편" 참고.
+# ==========================================================================
+
+
+@router.get("/setup-status", response_model=SetupStatusOut)
+def setup_status(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> SetupStatusOut:
+    return SetupStatusOut(initial_db_setup_seen=get_setup_status(db))
+
+
+@router.post("/setup-status/mark-seen", response_model=SetupStatusOut)
+def setup_status_mark_seen(
+    _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> SetupStatusOut:
+    """최초 설정 게이트를 건너뛰거나(외부 DB 연동을 선택해 별도 화면으로 이동) 안내만 확인한
+    경우 - 이후 로그인부터는 게이트가 다시 뜨지 않도록 표시만 한다."""
+    mark_setup_seen(db)
+    return SetupStatusOut(initial_db_setup_seen=True)
+
+
+@router.post("/database/local-setup", response_model=LocalDbSetupResult)
+def database_local_setup(
+    payload: LocalDbSetupRequest, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> LocalDbSetupResult:
+    """최초 설정 게이트에서 "로컬 DB 계속 사용"을 고른 뒤 제출하는 폼 - DB 계정 비밀번호
+    변경(안전, 기본값)이나 전체 초기화+비밀번호 변경(파괴적, wipe_data=true) 중 관리자가
+    직접 고른 쪽을 실행한다."""
+    if not payload.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 실행됩니다")
+    if payload.wipe_data and not payload.confirm_wipe:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "전체 초기화는 confirm_wipe=true로 별도 확인해야 실행됩니다 (기존 VM/요금 데이터가 모두 삭제됩니다)",
+        )
+    try:
+        return apply_local_db_setup(db, payload)
+    except LocalDbSetupError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - DB 접속/권한 등 다양한 원인을 그대로 안내
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"로컬 DB 설정 실패: {exc}") from exc
 
 
 # ==========================================================================

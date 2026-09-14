@@ -427,3 +427,22 @@ class User(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     tenant: Mapped["Tenant | None"] = relationship(back_populates="users")
+
+
+class AppState(Base):
+    """[v4.8] 앱 전체에 걸친 런타임 상태 한 줄짜리 싱글턴 테이블 (id=1 고정).
+
+    app/config.py의 Settings는 .env(컨테이너 기동 시점 환경변수) 기반이라 앱이 스스로
+    "다시 보여줄지 말지" 같은 상태를 저장하기에 적합하지 않다 - 그래서 이런 값은 DB에
+    별도 테이블로 둔다. 현재는 "최초 DB 설정 안내(로컬 계속 사용/외부 DB 연동)를 이미
+    보여줬는지" 플래그 하나뿐이지만, 앞으로 비슷한 1회성 플래그가 늘어나면 이 테이블에
+    컬럼을 추가하면 된다.
+    """
+
+    __tablename__ = "app_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    # [v4.8] "데이터베이스" 관리자 탭의 최초 설정 안내 팝업(로컬 DB 계속 사용/외부 DB
+    # 연동 중 하나를 고르는 화면)을 이미 보여줬거나 admin이 건너뛰었으면 True - 이후
+    # 로그인부터는 자동으로 다시 뜨지 않는다.
+    initial_db_setup_seen: Mapped[bool] = mapped_column(Boolean, default=False)

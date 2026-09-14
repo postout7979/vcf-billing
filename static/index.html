@@ -421,6 +421,7 @@
         <p class="muted">이 애플리케이션이 지금 실제로 쓰고 있는 DB 정보입니다.</p>
       </div>
       <div class="drilldown-actions">
+        <button class="btn btn-ghost btn-sm" id="database-status-local-setup-btn">로컬 DB 설정</button>
         <button class="btn btn-ghost btn-sm" id="database-status-refresh-btn">새로고침</button>
         <button class="btn btn-ghost btn-sm" id="database-status-modal-close">닫기 ✕</button>
       </div>
@@ -516,6 +517,80 @@
       </div>
       <p class="muted small" style="font-weight:600;">다음 단계:</p>
       <ol id="external-db-migrate-steps" class="muted small"></ol>
+    </div>
+  </div>
+</div>
+
+<!-- ============ [v4.8] 최초 로그인 - 로컬/외부 DB 선택 게이트 ============
+     admin이 최초 로그인한 직후 1회만 뜬다(app/db_admin.py의 AppState.initial_db_setup_seen).
+     "로그인 전에 DB를 고른다"는 것 자체가 아키텍처상 불가능해서(로그인이 되려면 이미 DB가
+     연결되어 있어야 함) 이 팝업으로 근사한다 - claude/vcf-billing-portal-design.md
+     "v4.8 개편" 참고. -->
+<div id="initial-db-setup-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>데이터베이스 설정</h3>
+    </div>
+    <p class="muted small">
+      최초 관리자 로그인입니다. 지금 이미 연결되어 있는 로컬 데이터베이스를 계속 사용할지,
+      아니면 별도의 외부 PostgreSQL 서버로 옮겨서 사용할지 선택하세요. "로컬 DB 계속 사용"을
+      고르면 이 자리에서 곧바로 DB 계정 비밀번호를 정의하거나(기존 데이터 유지) 기존 데이터를
+      전체 초기화할 수 있습니다. 이 선택은 나중에 "데이터베이스" 메뉴에서 언제든 다시 진행할
+      수 있으니, 지금 결정하지 않아도 됩니다.
+    </p>
+    <div class="menu-grid">
+      <div class="menu-card">
+        <h4>로컬 DB 계속 사용</h4>
+        <p class="muted small">지금 연결된 DB를 그대로 사용합니다. 계정 비밀번호를 정하고, 필요하면 기존 데이터를 초기화할 수 있습니다.</p>
+        <button class="btn btn-primary" id="initial-setup-local-btn">로컬 DB 설정</button>
+      </div>
+      <div class="menu-card">
+        <h4>외부 DB 연동</h4>
+        <p class="muted small">별도의 외부 PostgreSQL 서버로 데이터를 옮겨서 사용합니다.</p>
+        <button class="btn btn-ghost" id="initial-setup-external-btn">외부 DB 연동</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="initial-setup-skip-btn">나중에 결정 (건너뛰기)</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ [v4.8] 로컬 DB 설정 (계정 비밀번호 변경 / 전체 초기화) ============
+     최초 설정 게이트의 "로컬 DB 설정" 버튼과, "데이터베이스" 탭의 "현재 DB 상태" 팝업 안
+     버튼에서 공용으로 연다(언제든 다시 비밀번호를 바꾸거나 초기화할 수 있도록). -->
+<div id="local-db-setup-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>로컬 DB 설정</h3>
+      <button class="btn btn-ghost btn-sm" id="local-db-setup-modal-close">✕</button>
+    </div>
+    <p id="local-db-setup-sqlite-note" class="form-note" hidden>
+      현재 SQLite 로컬 파일 DB를 사용 중입니다. SQLite는 별도의 계정/비밀번호 개념이 없어
+      "비밀번호만 변경"은 제공되지 않습니다 — 데이터를 지우고 새로 시작하려면 아래에서
+      "기존 데이터 전체 초기화"를 선택하세요.
+    </p>
+    <form id="local-db-setup-form">
+      <div class="field-row" id="local-db-setup-password-row">
+        <label class="field-label" for="local-db-setup-password">새 DB 계정 비밀번호</label>
+        <input id="local-db-setup-password" type="password" minlength="8" placeholder="8자 이상" />
+      </div>
+      <div class="field-row" id="local-db-setup-password-confirm-row">
+        <label class="field-label" for="local-db-setup-password-confirm">비밀번호 확인</label>
+        <input id="local-db-setup-password-confirm" type="password" minlength="8" />
+      </div>
+      <div class="field-row checkbox-row">
+        <label><input type="checkbox" id="local-db-setup-wipe" /> 기존에 수집된 VM/요금 데이터를 포함해 전체 초기화 (되돌릴 수 없습니다)</label>
+      </div>
+      <p id="local-db-setup-error" class="form-error" hidden></p>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" id="local-db-setup-submit-btn">적용</button>
+      </div>
+    </form>
+    <div id="local-db-setup-result" hidden style="margin-top: 16px;">
+      <p id="local-db-setup-message" class="form-note success"></p>
+      <p class="muted small" style="font-weight:600;">다음 단계:</p>
+      <ol id="local-db-setup-steps" class="muted small"></ol>
     </div>
   </div>
 </div>

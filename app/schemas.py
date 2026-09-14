@@ -505,3 +505,39 @@ class ExternalDbMigrateResult(BaseModel):
     database_url: str | None = None
     database_url_masked: str | None = None
     next_steps: list[str] = []
+
+
+# ==========================================================================
+# [v4.8] 최초 로그인 DB 설정 게이트 (로컬 DB 계속 사용 / 외부 DB 연동 안내 + 로컬 DB
+# 계정 비밀번호 변경/전체 초기화)
+# ==========================================================================
+
+
+class SetupStatusOut(BaseModel):
+    """admin이 최초 로그인 설정 게이트를 이미 봤는지 여부 - 봤으면 다시 띄우지 않는다."""
+
+    initial_db_setup_seen: bool
+
+
+class LocalDbSetupRequest(BaseModel):
+    """"로컬 DB 계속 사용" 선택 시 제출하는 폼.
+
+    wipe_data=False(기본값, 안전 경로): DB 계정(PostgreSQL 로그인 역할) 비밀번호만
+    변경한다 - 기존에 수집된 VM/요금 데이터는 전혀 건드리지 않는다.
+    wipe_data=True(파괴적 경로): 비밀번호 변경에 더해 모든 테이블을 지우고 스키마를
+    새로 만든 뒤 기본 admin 계정(admin/admin1!2@3#)을 재생성한다 - 기존 데이터가
+    전부 사라지므로, 프론트엔드의 confirm() 다이얼로그에 더해 서버에서도
+    confirm_wipe=true를 별도로 명시해야만 실행된다(실수 방지 이중 확인).
+    """
+
+    confirm: bool = False
+    new_password: str = Field(min_length=8)
+    wipe_data: bool = False
+    confirm_wipe: bool = False
+
+
+class LocalDbSetupResult(BaseModel):
+    ok: bool
+    wiped: bool
+    message: str
+    next_steps: list[str] = []

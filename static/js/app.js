@@ -43,6 +43,8 @@ const state = {
   userModalMode: "create", // create | edit
   editingUserId: null,
   resettingUserId: null, // 현재 열려 있는 "비밀번호 초기화" 모달의 대상 사용자 id
+  // [v4.8] 로컬 DB 설정 팝업이 마지막으로 확인한 엔진 종류 (sqlite면 비밀번호 변경 UI를 숨김)
+  localDbSetupIsSqlite: false,
 };
 
 // 기간/월 선택 UI를 빠르게 연속 조작할 때, 먼저 시작된(느린) 흐름이 나중에 끝나
@@ -426,6 +428,28 @@ async function boot() {
   document.getElementById("external-db-form").addEventListener("submit", onExternalDbMigrateSubmit);
   document.getElementById("external-db-migrate-copy-btn").addEventListener("click", onCopyExternalDbUrl);
 
+  // [v4.8] 최초 로그인 DB 설정 게이트 + 로컬 DB 설정(비밀번호 변경/전체 초기화) 팝업
+  document.getElementById("initial-setup-local-btn").addEventListener("click", () => {
+    closeInitialDbSetupModal();
+    openLocalDbSetupModal();
+  });
+  document.getElementById("initial-setup-external-btn").addEventListener("click", () => {
+    closeInitialDbSetupModal();
+    markInitialDbSetupSeen();
+    openExternalDbModal();
+  });
+  document.getElementById("initial-setup-skip-btn").addEventListener("click", () => {
+    closeInitialDbSetupModal();
+    markInitialDbSetupSeen();
+    showToast('나중에 "데이터베이스" 메뉴에서 다시 설정할 수 있습니다.');
+  });
+  document.getElementById("database-status-local-setup-btn").addEventListener("click", () => {
+    closeDatabaseStatusModal();
+    openLocalDbSetupModal();
+  });
+  document.getElementById("local-db-setup-modal-close").addEventListener("click", closeLocalDbSetupModal);
+  document.getElementById("local-db-setup-form").addEventListener("submit", onLocalDbSetupFormSubmit);
+
   if (state.token) {
     try {
       state.user = await api("/auth/me");
@@ -473,6 +497,7 @@ function enterApp() {
   if (isAdmin) {
     loadTenantManagement(); // 테넌트 필터 드롭다운 채우기 + 캐시
     switchAdminPage("overview");
+    checkInitialDbSetupGate(); // [v4.8] 최초 로그인 시 1회만 로컬/외부 DB 선택 게이트 표시
   } else {
     refreshCurrentView();
   }
@@ -1017,6 +1042,149 @@ function openExternalDbModal() {
 
 function closeExternalDbModal() {
   document.getElementById("external-db-modal").hidden = true;
+}
+
+/* ---------------------------- [v4.8] 최초 로그인 DB 설정 게이트 ---------------------------- */
+
+/** admin으로 로그인할 때마다 호출 - 최초 1회(아직 안 봤을 때)만 게이트 팝업을 띄운다. */
+async function checkInitialDbSetupGate() {
+  try {
+    const status = await api("/admin/setup-status");
+    if (!status.initial_db_setup_seen) {
+      document.getElementById("initial-db-setup-modal").hidden = false;
+    }
+  } catch (_) {
+    // 조회 자체가 실패해도 게이트를 못 띄울 뿐 앱 사용은 계속할 수 있어야 하므로 조용히 무시.
+  }
+}
+
+function closeInitialDbSetupModal() {
+  document.getElementById("initial-db-setup-modal").hidden = true;
+}
+
+async function markInitialDbSetupSeen() {
+  try {
+    await api("/admin/setup-status/mark-seen", { method: "POST" });
+  } catch (_) {
+    /* no-op - 다음 로그인 때 게이트가 다시 뜨는 정도의 사소한 영향만 있음 */
+  }
+}
+
+/* ---------------------------- [v4.8] 로컬 DB 설정 (비밀번호 변경 / 전체 초기화) ---------------------------- */
+
+/** 최초 설정 게이트의 "로컬 DB 설정" 버튼, 그리고 "현재 DB 상태" 팝업의 "로컬 DB 설정"
+ * 버튼이 공용으로 여는 팝업 - 언제든 다시 비밀번호를 바꾸거나 초기화할 수 있다. */
+function openLocalDbSetupModal() {
+  document.getElementById("local-db-setup-form").reset();
+  document.getElementById("local-db-setup-form").hidden = false;
+  document.getElementById("local-db-setup-result").hidden = true;
+  document.getElementById("local-db-setup-error").hidden = true;
+  document.getElementById("local-db-setup-modal").hidden = false;
+  loadLocalDbSetupEngineInfo();
+}
+
+function closeLocalDbSetupModal() {
+  document.getElementById("local-db-setup-modal").hidden = true;
+}
+
+/** 엔진이 SQLite면 "DB 계정 비밀번호"라는 개념 자체가 없으므로(파일 하나가 DB 전체),
+ * 비밀번호 입력란을 숨기고 전체 초기화만 가능하도록 안내와 체크박스를 고정한다. */
+async function loadLocalDbSetupEngineInfo() {
+  let isSqlite = false;
+  try {
+    const data = await api("/admin/database");
+    isSqlite = data.engine === "sqlite";
+  } catch (_) {
+    // 조회 실패 시에는 PostgreSQL로 가정(폼 그대로 노출) - 실제 적용 시점에 서버가 다시 검증한다.
+  }
+  state.localDbSetupIsSqlite = isSqlite;
+
+  document.getElementById("local-db-setup-sqlite-note").hidden = !isSqlite;
+  document.getElementById("local-db-setup-password-row").hidden = isSqlite;
+  document.getElementById("local-db-setup-password-confirm-row").hidden = isSqlite;
+  document.getElementById("local-db-setup-password").required = !isSqlite;
+  document.getElementById("local-db-setup-password-confirm").required = !isSqlite;
+
+  const wipeCheckbox = document.getElementById("local-db-setup-wipe");
+  wipeCheckbox.disabled = isSqlite;
+  if (isSqlite) wipeCheckbox.checked = true; // SQLite에서 유일하게 의미 있는 경로이므로 미리 켜둔다
+}
+
+async function onLocalDbSetupFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("local-db-setup-error");
+  errEl.hidden = true;
+
+  const isSqlite = !!state.localDbSetupIsSqlite;
+  const wipe = document.getElementById("local-db-setup-wipe").checked;
+  const password = document.getElementById("local-db-setup-password").value;
+  const passwordConfirm = document.getElementById("local-db-setup-password-confirm").value;
+
+  if (isSqlite && !wipe) {
+    errEl.textContent = "SQLite 사용 중에는 전체 초기화 옵션만 선택할 수 있습니다.";
+    errEl.hidden = false;
+    return;
+  }
+  if (!isSqlite) {
+    if (password.length < 8) {
+      errEl.textContent = "비밀번호는 8자 이상이어야 합니다.";
+      errEl.hidden = false;
+      return;
+    }
+    if (password !== passwordConfirm) {
+      errEl.textContent = "비밀번호가 서로 일치하지 않습니다.";
+      errEl.hidden = false;
+      return;
+    }
+  }
+  if (wipe) {
+    const confirmed = confirm(
+      "기존에 수집된 VM/요금 데이터를 포함해 데이터베이스 전체를 초기화합니다. 이 작업은 되돌릴 " +
+        "수 없고, 완료 즉시 현재 로그인 세션이 무효화되어 기본 관리자 계정(admin/admin1!2@3#)으로 " +
+        "다시 로그인해야 합니다. 계속하시겠습니까?"
+    );
+    if (!confirmed) return;
+  }
+
+  const btn = document.getElementById("local-db-setup-submit-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "적용 중...";
+  try {
+    const payload = {
+      confirm: true,
+      // SQLite 전체 초기화 경로는 실제로 쓰이지 않는 값이지만, 스키마가 항상 8자 이상을
+      // 요구하므로(PostgreSQL 경로와 검증 로직을 공유) 자리표시용 값을 채워 보낸다.
+      new_password: isSqlite ? "sqlite-wipe-placeholder" : password,
+      wipe_data: wipe,
+      confirm_wipe: wipe,
+    };
+    const result = await api("/admin/database/local-setup", { method: "POST", body: JSON.stringify(payload) });
+
+    document.getElementById("local-db-setup-message").textContent = result.message;
+    document.getElementById("local-db-setup-steps").innerHTML = result.next_steps
+      .map((step) => `<li>${escapeHtml(step)}</li>`)
+      .join("");
+    document.getElementById("local-db-setup-result").hidden = false;
+    document.getElementById("local-db-setup-form").hidden = true;
+    showToast(result.wiped ? "로컬 DB를 초기화했습니다." : "DB 계정 비밀번호를 변경했습니다.", "success");
+
+    if (result.wiped) {
+      // 방금 로그인해 있던 admin 계정 행 자체가 삭제/재생성되었으므로, 현재 세션은 더 이상
+      // 유효하지 않은 것으로 취급하고 자동으로 로그아웃시켜 기본 계정으로 재로그인을 유도한다.
+      setTimeout(() => {
+        closeLocalDbSetupModal();
+        doLogout();
+        showToast("초기화가 완료되어 로그아웃되었습니다. 기본 관리자 계정으로 다시 로그인하세요.");
+      }, 2500);
+    }
+  } catch (err) {
+    errEl.textContent = err.message || "적용에 실패했습니다.";
+    errEl.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
 }
 
 async function loadDatabaseOverview() {
