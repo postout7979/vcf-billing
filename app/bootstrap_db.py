@@ -23,12 +23,48 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
 from app.database import Base, OpsBase, SessionLocal, engine, ops_engine, wait_for_db, wait_for_db_ops
 from app.models import User, UserRole
 import app.models_ops  # noqa: F401  (OpsBase.metadata에 Operations DB 테이블을 등록시키기 위한 import)
 from app.security.passwords import hash_password
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_column(target_engine: Engine, table: str, column: str, sql_type: str, default_sql: str) -> None:
+    """[v4.10] 이미 운영 중인 배포(기존 테이블이 있는 DB)에 새 컬럼을 경량 추가한다.
+
+    `Base.metadata.create_all()`/`OpsBase.metadata.create_all()`은 "없는 테이블"만
+    만들 뿐 "이미 있는 테이블의 없는 컬럼"은 채워주지 않는다 - 이 프로젝트는 Alembic
+    같은 정식 마이그레이션 도구 없이 zip/git으로 코드만 갱신하는 배포 방식(design.md
+    참고)이라, 모델에 컬럼을 추가할 때마다 기존 DB에도 반영되는 이런 경량 보정이
+    없으면 컬럼이 없는 채로 남아 다음 쿼리에서 바로 오류가 난다. 멱등(이미 있으면
+    아무 것도 안 함)이라 여러 번 실행해도 안전하다.
+    """
+    with target_engine.begin() as conn:
+        if target_engine.dialect.name == "sqlite":
+            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if column not in existing:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type} DEFAULT {default_sql}"))
+        else:
+            conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {sql_type} DEFAULT {default_sql}")
+            )
+
+
+def _run_light_migrations() -> None:
+    """[v4.10] 백업/복구 기능 도입 시 추가한 IntegrationAccount.needs_reconnect 컬럼 보정."""
+    is_sqlite = ops_engine.dialect.name == "sqlite"
+    _ensure_column(
+        ops_engine,
+        "integration_accounts",
+        "needs_reconnect",
+        "BOOLEAN NOT NULL" if not is_sqlite else "BOOLEAN",
+        "0" if is_sqlite else "FALSE",
+    )
 
 DEFAULT_ADMIN_EMAIL = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin1!2@3#"
@@ -73,6 +109,7 @@ def bootstrap() -> None:
 
     wait_for_db_ops()
     OpsBase.metadata.create_all(bind=ops_engine)
+    _run_light_migrations()
 
     ensure_default_admin()
 

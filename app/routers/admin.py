@@ -15,10 +15,21 @@ app/project_criteria.py(연결 테이블 id 목록)와 app/ops_queries.py(Operat
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+import datetime as dt
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.auth import hash_password, require_admin
+from app.backup_restore import (
+    BackupFormatError,
+    RestoreConfirmationError,
+    backup_filename,
+    build_backup_manifest,
+    export_backup_bundle,
+    parse_backup_bundle,
+    restore_backup_bundle,
+)
 from app.billing.aggregator import (
     available_months,
     calendar_month_period,
@@ -52,6 +63,9 @@ from app.project_criteria import delete_project_criteria, get_project_criteria_i
 from app.routers.common import parse_month_param, parse_period, project_to_out, project_usage_to_schema
 from app.schemas import (
     AdminOverviewOut,
+    BackupManifestOut,
+    BackupRestoreResult,
+    BackupTableCountsOut,
     ClusterOut,
     DatabaseOverviewOut,
     DatacenterOut,
@@ -208,6 +222,83 @@ def operations_database_external_setup(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - 접속/네트워크 등 다양한 원인을 그대로 안내
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"마이그레이션 실패: {exc}") from exc
+
+
+# ==========================================================================
+# [v4.10] 백업 & 복구 (Billing DB + Operations DB 통합, 신규 배포 시 테넌트/프로젝트/
+# 과금 원천 데이터 손실 방지). 연동 계정 접속정보는 백업에 포함하지 않는다 - 복구 후
+# "계정 연동" 화면에서 다시 입력해야 한다. app/backup_restore.py 상단 주석 참고.
+# ==========================================================================
+
+
+@router.get("/backup/manifest", response_model=BackupManifestOut)
+def backup_manifest(
+    _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
+) -> BackupManifestOut:
+    """"백업 대상 리스트" 화면에 보여줄, 현재 시점 기준 테이블별 대상/행수 목록."""
+    items = build_backup_manifest(db, ops_db)
+    return BackupManifestOut(
+        generated_at=dt.datetime.now(dt.timezone.utc),
+        note=(
+            "백업 파일은 VCF Operations 연동 계정의 접속정보(URL/계정명/암호화된 비밀번호)를 "
+            "포함하지 않습니다 - 복구 후 '계정 연동' 화면에서 다시 입력해야 합니다."
+        ),
+        items=items,
+    )
+
+
+@router.get("/backup/export")
+def backup_export(
+    _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
+) -> Response:
+    """Billing DB + Operations DB의 백업 대상 데이터를 하나의 파일(.json.gz)로 내려받는다."""
+    data = export_backup_bundle(db, ops_db)
+    return Response(
+        content=data,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{backup_filename()}"'},
+    )
+
+
+@router.post("/backup/restore", response_model=BackupRestoreResult)
+def backup_restore(
+    file: UploadFile = File(..., description="backup/export로 내려받은 .json.gz 백업 파일"),
+    confirm: bool = Form(False, description="true로 명시적으로 확인해야 실행됩니다 (파괴적 - 현재 데이터 전체 교체)"),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
+) -> BackupRestoreResult:
+    """백업 파일로부터 Billing DB + Operations DB를 복구한다.
+
+    복구는 항상 파괴적 전체 교체다 - 대상 테이블(app/backup_restore.py의 BILLING_TABLES/
+    OPERATIONS_TABLES)을 모두 비운 뒤 백업 내용으로 다시 채운다. "신규 배포 직후,
+    아직 이 배포에는 의미 있는 데이터가 없는 상태에서 이전 백업을 되살리는 것"이
+    주 사용 시나리오다 - 이미 운영 중인 배포에 실행하면 그 사이에 쌓인 데이터가 모두
+    사라지므로, 프론트엔드가 confirm() 다이얼로그로 두 번 확인한 뒤에만 confirm=true로 보낸다.
+    """
+    if not confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 복구가 실행됩니다")
+    raw = file.file.read()
+    try:
+        bundle = parse_backup_bundle(raw)
+        counts = restore_backup_bundle(db, ops_db, bundle, confirm=confirm)
+    except BackupFormatError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except RestoreConfirmationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - DB 오류 등 다양한 원인을 그대로 안내
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"복구 실패: {exc}") from exc
+
+    billing_rows = sum(counts["billing"].values())
+    ops_rows = sum(counts["operations"].values())
+    return BackupRestoreResult(
+        ok=True,
+        message=(
+            f"복구를 완료했습니다 (Billing DB {billing_rows}행, Operations DB {ops_rows}행). "
+            "접속정보가 제외된 연동 계정은 '계정 연동' 화면에서 재등록해야 정상 동작합니다."
+        ),
+        counts=BackupTableCountsOut(billing=counts["billing"], operations=counts["operations"]),
+    )
 
 
 # ==========================================================================
@@ -507,6 +598,7 @@ def _integration_account_to_out(a: IntegrationAccount) -> IntegrationAccountOut:
         last_sync_at=a.last_sync_at,
         last_sync_error=a.last_sync_error,
         last_sync_vm_count=a.last_sync_vm_count,
+        needs_reconnect=a.needs_reconnect,
     )
 
 
@@ -631,6 +723,11 @@ def update_integration_account(
     if payload.verify_ssl is not None and payload.verify_ssl != account.verify_ssl:
         account.verify_ssl = payload.verify_ssl
         connection_changed = True
+    # [v4.10] 백업 복구로 생성된 자리표시자 계정(needs_reconnect=True)에 실제 접속정보를
+    # 입력해 저장하면 정상 계정으로 전환한다 - id가 그대로라 이미 복구되어 있던
+    # VM/PowerSample 등은 별도 처리 없이 다음 수집부터 같은 행이 갱신(upsert)된다.
+    if connection_changed and account.needs_reconnect:
+        account.needs_reconnect = False
     account.updated_by = admin.email
     ops_db.commit()
     ops_db.refresh(account)

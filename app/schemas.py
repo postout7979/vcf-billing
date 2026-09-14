@@ -133,6 +133,9 @@ class IntegrationAccountOut(BaseModel):
     last_sync_at: dt.datetime | None
     last_sync_error: str | None
     last_sync_vm_count: int
+    # [v4.10] 백업 복구로 생성된 자리표시자 계정이면 True - 접속정보(URL/계정/비밀번호)를
+    # 입력해 저장하기 전까지는 연동이 항상 실패한다. app/backup_restore.py 참고.
+    needs_reconnect: bool = False
 
 
 class IntegrationSyncOut(BaseModel):
@@ -576,3 +579,34 @@ class OperationsDbLocalSetupResult(BaseModel):
     operations_database_url_masked: str
     message: str
     next_steps: list[str] = []
+
+
+# ==========================================================================
+# [v4.10] 백업 & 복구 (Billing DB + Operations DB 통합) - app/backup_restore.py 참고
+# ==========================================================================
+
+
+class BackupManifestItemOut(BaseModel):
+    database: str  # "billing" | "operations"
+    table: str
+    label: str
+    row_count: int
+
+
+class BackupManifestOut(BaseModel):
+    generated_at: dt.datetime
+    note: str
+    items: list[BackupManifestItemOut]
+
+
+class BackupTableCountsOut(BaseModel):
+    """복구 실행 후 실제로 채워진 테이블별 행수 (billing/operations 각각)."""
+
+    billing: dict[str, int]
+    operations: dict[str, int]
+
+
+class BackupRestoreResult(BaseModel):
+    ok: bool
+    message: str
+    counts: BackupTableCountsOut

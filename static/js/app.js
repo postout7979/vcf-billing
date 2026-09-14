@@ -202,6 +202,15 @@ function fmtDateTimeKst(isoString) {
 }
 
 function syncStatusBadgeHtml(account) {
+  // [v4.10] 백업 복구로 생성된 자리표시자 계정은 last_sync_status가 무엇이든(대개 "never"
+  // 또는 "error") 우선 이 배지를 보여준다 - 관리자가 해야 할 일이 "재시도"가 아니라
+  // "접속정보 입력"이라는 것을 분명히 알 수 있도록.
+  if (account.needs_reconnect) {
+    return (
+      `<span class="status-badge status-pending">⚠ 재등록 필요</span>` +
+      `<div class="muted small">백업 복구로 생성된 계정입니다 - 접속정보를 입력해 저장하세요</div>`
+    );
+  }
   const status = account.last_sync_status;
   // [v4.2] 마지막 동기화 시각을 배지 title(마우스 오버) 안에만 두지 않고, 항상 보이는
   // 텍스트로도 함께 표시한다 - 관리자가 굳이 마우스를 올려보지 않아도 알 수 있도록.
@@ -453,6 +462,18 @@ async function boot() {
   document.getElementById("operations-local-db-modal-close").addEventListener("click", closeOperationsLocalDbModal);
   document.getElementById("operations-local-db-form").addEventListener("submit", onOperationsLocalDbFormSubmit);
   document.getElementById("operations-external-db-open-btn").addEventListener("click", () => openExternalDbModal("operations"));
+
+  // [v4.10] 백업 & 복구 (Billing + Operations 통합)
+  document.getElementById("backup-manifest-open-btn").addEventListener("click", openBackupManifestModal);
+  document.getElementById("backup-manifest-refresh-btn").addEventListener("click", loadBackupManifest);
+  document.getElementById("backup-manifest-modal-close").addEventListener("click", closeBackupManifestModal);
+  document.getElementById("backup-manifest-export-btn").addEventListener("click", onBackupExport);
+  document.getElementById("backup-export-btn").addEventListener("click", onBackupExport);
+  document.getElementById("backup-restore-open-btn").addEventListener("click", openBackupRestoreModal);
+  document.getElementById("backup-restore-modal-close").addEventListener("click", closeBackupRestoreModal);
+  document.getElementById("backup-restore-file").addEventListener("change", updateBackupRestoreSubmitState);
+  document.getElementById("backup-restore-confirm-checkbox").addEventListener("change", updateBackupRestoreSubmitState);
+  document.getElementById("backup-restore-form").addEventListener("submit", onBackupRestoreFormSubmit);
 
   // [v4.8→v4.9] 최초 로그인 설정 마법사 (1단계: 관리자 비밀번호 변경 / 2단계: Billing DB /
   // 3단계: Operations DB) - 하위 팝업(로컬·외부 DB 설정)을 열 때는 마법사 팝업 자체를
@@ -1447,6 +1468,127 @@ async function onOperationsLocalDbFormSubmit(e) {
   } finally {
     btn.disabled = false;
     btn.textContent = originalText;
+  }
+}
+
+/* ---------------------------- [v4.10] 백업 & 복구 (Billing + Operations 통합) ---------------------------- */
+
+function openBackupManifestModal() {
+  document.getElementById("backup-manifest-modal").hidden = false;
+  loadBackupManifest();
+}
+
+function closeBackupManifestModal() {
+  document.getElementById("backup-manifest-modal").hidden = true;
+}
+
+const BACKUP_DATABASE_LABEL_KO = { billing: "Billing DB", operations: "Operations DB" };
+
+async function loadBackupManifest() {
+  let data;
+  try {
+    data = await api("/admin/backup/manifest");
+  } catch (err) {
+    showToast(err.message, "error");
+    return;
+  }
+  document.getElementById("backup-manifest-note").textContent = data.note;
+  const tbody = document.getElementById("backup-manifest-table-body");
+  tbody.innerHTML = data.items
+    .map(
+      (item) => `
+    <tr>
+      <td>${escapeHtml(BACKUP_DATABASE_LABEL_KO[item.database] || item.database)}</td>
+      <td>${escapeHtml(item.label)} <span class="muted small">(<code>${escapeHtml(item.table)}</code>)</span></td>
+      <td>${fmtNum(item.row_count)}</td>
+    </tr>`
+    )
+    .join("");
+}
+
+async function onBackupExport() {
+  // "백업 대상 리스트" 팝업/"데이터베이스" 탭 카드 두 곳에서 공용으로 쓴다.
+  const buttons = [document.getElementById("backup-manifest-export-btn"), document.getElementById("backup-export-btn")];
+  buttons.forEach((btn) => {
+    btn.disabled = true;
+  });
+  try {
+    // downloadPdf()는 이름과 달리 인증 헤더를 붙여 파일을 받아 다운로드시키는 범용
+    // 헬퍼다 (app/routers/admin.py의 GET /admin/database/export에서도 재사용).
+    await downloadPdf("/admin/backup/export", "vcf-billing-backup.json.gz");
+  } finally {
+    buttons.forEach((btn) => {
+      btn.disabled = false;
+    });
+  }
+}
+
+function openBackupRestoreModal() {
+  document.getElementById("backup-restore-form").reset();
+  document.getElementById("backup-restore-form").hidden = false;
+  document.getElementById("backup-restore-result").hidden = true;
+  document.getElementById("backup-restore-error").hidden = true;
+  updateBackupRestoreSubmitState();
+  document.getElementById("backup-restore-modal").hidden = false;
+}
+
+function closeBackupRestoreModal() {
+  document.getElementById("backup-restore-modal").hidden = true;
+}
+
+function updateBackupRestoreSubmitState() {
+  const hasFile = document.getElementById("backup-restore-file").files.length > 0;
+  const confirmed = document.getElementById("backup-restore-confirm-checkbox").checked;
+  document.getElementById("backup-restore-submit-btn").disabled = !(hasFile && confirmed);
+}
+
+async function onBackupRestoreFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("backup-restore-error");
+  errEl.hidden = true;
+  const fileInput = document.getElementById("backup-restore-file");
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  if (
+    !confirm(
+      "정말 복구하시겠습니까?\n\n현재 Billing DB + Operations DB의 테넌트/프로젝트/요금/VM 이력 데이터가 모두 지워지고 " +
+        `선택한 백업 파일(${file.name}) 내용으로 완전히 대체됩니다. 되돌릴 수 없습니다.`
+    )
+  ) {
+    return;
+  }
+
+  const btn = document.getElementById("backup-restore-submit-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "복구 중...";
+  try {
+    // 파일 업로드(multipart/form-data)라 api() 헬퍼(Content-Type: application/json 고정)를
+    // 쓰지 않고 fetch를 직접 호출한다 - Content-Type은 브라우저가 boundary를 붙여 자동 설정.
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("confirm", "true");
+    const headers = {};
+    if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
+    const res = await fetch(`${API_BASE}/admin/backup/restore`, { method: "POST", headers, body: formData });
+    const body = await res.json();
+    if (!res.ok) {
+      throw new Error(body.detail || "복구에 실패했습니다.");
+    }
+    document.getElementById("backup-restore-message").textContent = body.message;
+    document.getElementById("backup-restore-result").hidden = false;
+    document.getElementById("backup-restore-form").hidden = true;
+    showToast("복구를 완료했습니다.", "success");
+    // 복구로 테넌트/프로젝트/연동 계정 등 전체 데이터가 교체되었으므로 현재 화면을 다시 그린다.
+    refreshCurrentView();
+  } catch (err) {
+    errEl.textContent = err.message || "복구에 실패했습니다.";
+    errEl.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    updateBackupRestoreSubmitState();
   }
 }
 

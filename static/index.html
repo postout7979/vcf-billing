@@ -402,6 +402,41 @@
         </div>
       </div>
 
+      <!-- [v4.10 신규] Billing DB + Operations DB를 하나의 파일로 묶는 통합 백업/복구.
+           v4.9에서 두 DB를 논리적으로 분리했지만, "신규 배포 시 테넌트/프로젝트/과금
+           원천 데이터(PowerSample)를 잃지 않는다"는 목표에는 두 DB를 하나의 백업
+           단위로 다루는 편이 낫다는 판단(design.md "v4.10 개편" 참고) - 아래 두 섹션
+           (Billing/Operations 개별 DB 상태·전환)과는 별개로, 이 카드 하나로 두 DB의
+           백업 대상 데이터를 한 파일로 내보내고 한 번에 복구한다. -->
+      <section class="card">
+        <div class="page-head" style="margin-bottom: 8px;">
+          <h3 style="margin:0;">백업 &amp; 복구 (Billing + Operations 통합)</h3>
+        </div>
+        <p class="muted small">
+          테넌트/프로젝트/요금/사용자 계정(Billing DB)과 VM 인벤토리·전원상태 이력(Operations DB,
+          과금 계산의 원천 데이터)을 하나의 파일로 함께 백업합니다. VCF Operations 연동 계정의
+          접속정보(URL/계정명/비밀번호)는 백업에 포함되지 않습니다 - 복구 후 "계정 연동" 화면에서
+          다시 입력해야 합니다.
+        </p>
+        <div class="menu-grid">
+          <div class="menu-card">
+            <h4>백업 대상 리스트</h4>
+            <p class="muted small">이번 백업에 포함되는 테이블과 현재 행 수를 확인합니다.</p>
+            <button class="btn btn-ghost" id="backup-manifest-open-btn">대상 목록 보기</button>
+          </div>
+          <div class="menu-card">
+            <h4>백업</h4>
+            <p class="muted small">Billing + Operations 데이터를 하나의 파일(.json.gz)로 내려받습니다.</p>
+            <button class="btn btn-primary" id="backup-export-btn">백업 다운로드</button>
+          </div>
+          <div class="menu-card">
+            <h4>복구</h4>
+            <p class="muted small">백업 파일로 현재 데이터를 되돌립니다 (신규 배포 직후 사용 권장 - 현재 데이터를 모두 대체합니다).</p>
+            <button class="btn btn-ghost danger" id="backup-restore-open-btn">복구</button>
+          </div>
+        </div>
+      </section>
+
       <section class="card">
         <div class="page-head" style="margin-bottom: 8px;">
           <h3 style="margin:0;">Billing 데이터베이스</h3>
@@ -763,6 +798,71 @@
       <p id="operations-local-db-message" class="form-note success"></p>
       <p class="muted small" style="font-weight:600;">다음 단계:</p>
       <ol id="operations-local-db-steps" class="muted small"></ol>
+    </div>
+  </div>
+</div>
+
+<!-- ============ [v4.10] 백업 대상 리스트 팝업 ============
+     "데이터베이스" 탭의 "백업 & 복구" 카드에서 연다. GET /admin/backup/manifest로
+     채운다 - 현재 시점 기준 테이블별 대상/행수를 사용자에게 그대로 보여준다. -->
+<div id="backup-manifest-modal" class="modal-backdrop" hidden>
+  <div class="modal modal-wide card">
+    <div class="drilldown-head">
+      <div>
+        <h3>백업 대상 리스트</h3>
+        <p class="muted" id="backup-manifest-note">이 항목들이 다음 백업 파일에 포함됩니다.</p>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="backup-manifest-refresh-btn">새로고침</button>
+        <button class="btn btn-ghost btn-sm" id="backup-manifest-modal-close">닫기 ✕</button>
+      </div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>데이터베이스</th>
+          <th>테이블</th>
+          <th>행 수</th>
+        </tr>
+      </thead>
+      <tbody id="backup-manifest-table-body"></tbody>
+    </table>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="backup-manifest-export-btn">백업 다운로드</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ [v4.10] 복구 팝업 ============
+     "데이터베이스" 탭의 "백업 & 복구" 카드에서 연다. 파괴적 작업(현재 데이터 전체
+     교체)이라 파일 선택 + 명시적 확인 체크박스 + confirm() 다이얼로그로 이중 확인한다. -->
+<div id="backup-restore-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>백업 파일로 복구</h3>
+      <button class="btn btn-ghost btn-sm" id="backup-restore-modal-close">✕</button>
+    </div>
+    <p class="form-note" style="color: var(--danger);">
+      복구를 실행하면 현재 Billing DB + Operations DB의 백업 대상 데이터가 모두 지워지고
+      선택한 백업 파일의 내용으로 완전히 대체됩니다 (되돌릴 수 없습니다). 신규 배포 직후처럼
+      현재 데이터가 비어 있거나 의미가 없을 때만 사용하세요.
+    </p>
+    <form id="backup-restore-form">
+      <div class="field-row">
+        <label class="field-label" for="backup-restore-file">백업 파일 (.json.gz)</label>
+        <input id="backup-restore-file" type="file" accept=".gz,.json,application/gzip,application/json" required />
+      </div>
+      <label class="field-row" style="flex-direction: row; align-items: center; gap: 8px;">
+        <input id="backup-restore-confirm-checkbox" type="checkbox" style="width:auto;" />
+        <span class="muted small">현재 데이터가 모두 사라지고 백업 파일 내용으로 대체되는 것에 동의합니다.</span>
+      </label>
+      <p id="backup-restore-error" class="form-error" hidden></p>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-ghost danger" id="backup-restore-submit-btn" disabled>복구 실행</button>
+      </div>
+    </form>
+    <div id="backup-restore-result" hidden style="margin-top: 16px;">
+      <p id="backup-restore-message" class="form-note success"></p>
     </div>
   </div>
 </div>

@@ -118,6 +118,16 @@ class IntegrationAccount(OpsBase):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     updated_by: Mapped[str] = mapped_column(String(256), default="system")
 
+    # [v4.10] 백업 파일에서 이 계정이 "복구로 되살아난" 것인지 표시하는 플래그.
+    # app/backup_restore.py 참고 - 백업에는 연동 계정의 접속정보(base_url/username/
+    # password_encrypted)를 포함하지 않으므로, 복구 시 이 값들을 빈 값으로 채우고 이
+    # 플래그를 True로 세운다. 관리자 화면은 이 플래그가 True인 계정에 "재등록 필요"
+    # 배지를 보여주고, 계정 수정 폼으로 실제 접속정보를 입력해 저장하면(기존 "계정
+    # 수정" 흐름 그대로) id가 그대로 유지된 채 정상 계정으로 전환된다 - 이미 복구되어
+    # 있던 VirtualMachine/PowerSample 등도 같은 id를 그대로 참조하고 있으므로 별도
+    # 재연결 로직 없이 다음 수집 주기부터 기존 행이 그대로 갱신(upsert)된다.
+    needs_reconnect: Mapped[bool] = mapped_column(Boolean, default=False)
+
     vcenters: Mapped[list["VCenter"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")
     tags: Mapped[list["Tag"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")
     vms: Mapped[list["VirtualMachine"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")

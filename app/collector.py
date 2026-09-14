@@ -328,6 +328,14 @@ def sync_account_once(
 
     반환값: (status, message, new_sample_count) - status는 "success" | "error".
     """
+    # [v4.10] 백업 복구로 되살아난 자리표시자 계정(needs_reconnect=True)은 접속정보가
+    # 비어 있어 연결 시도 자체가 항상 실패한다 - 매 5분마다 의미 없는 오류 로그/상태를
+    # 남기는 대신, 관리자가 실제 접속정보를 입력해 저장할 때까지 조용히 건너뛴다
+    # (app/models_ops.py의 needs_reconnect 필드 주석, app/routers/admin.py의
+    # update_integration_account 참고 - 접속정보를 저장하면 이 플래그가 해제된다).
+    if account.needs_reconnect:
+        return "error", "백업 복구로 생성된 계정입니다 - 실제 접속정보를 입력해 재등록한 뒤 다시 시도하세요.", 0
+
     client = build_client_for_integration_account(account)
     try:
         try:
