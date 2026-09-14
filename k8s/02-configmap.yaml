@@ -1,0 +1,13 @@
+# [v4.11] 민감하지 않은 설정값 (.env.example의 나머지 항목과 동일).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vcf-billing-config
+  namespace: vcf-billing
+data:
+  # 데이터 수집 주기(분). 과금 단위와 항상 일치한다.
+  COLLECTOR_INTERVAL_MINUTES: "5"
+  # VM별 CPU/메모리 실사용률 추가 수집 여부 (사용량 가중치 과금용). VM이 매우 많은
+  # 환경에서 수집 부하를 줄이려면 "false"로.
+  COLLECT_USAGE_METRICS: "true"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "480"

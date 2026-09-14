@@ -1,0 +1,57 @@
+# [v4.11] VM 인벤토리/전원상태 수집 백그라운드 루프 (docker-compose.yml의 collector
+# 서비스와 동일).
+#
+# *** replicas를 절대 1보다 크게 늘리지 말 것 ***. 두 파드가 동시에 같은 연동
+# 계정을 수집하면 PowerSample이 중복 적재되거나 서로 경쟁하는 상태가 될 수 있다
+# (app/bootstrap_db.py가 migrate를 별도 Job으로 뺀 것과 같은 이유 - "동시 실행 경쟁
+# 상태" 자체를 원천 차단하는 것이 이 프로젝트의 일관된 설계 원칙). 가용성이
+# 필요하면 replicas가 아니라 재시작(livenessProbe)에 맡긴다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcf-billing-collector
+  namespace: vcf-billing
+spec:
+  replicas: 1
+  strategy:
+    # RollingUpdate(기본값)를 쓰면 새 파드가 Ready 되는 동안 이전 파드가 잠깐
+    # 같이 떠 있어 위 "replicas=1 유지" 전제가 순간적으로 깨진다. Recreate로 이전
+    # 파드를 완전히 내린 뒤에만 새 파드를 띄우게 강제한다 - 그 사이 몇 분간
+    # 수집이 멈추는 것은 5분 주기 수집 특성상 허용 가능한 트레이드오프다.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vcf-billing-collector
+  template:
+    metadata:
+      labels:
+        app: vcf-billing-collector
+    spec:
+      # dnsConfig 관련 안내는 05-api.yaml 상단 주석과 동일 (docs/k8s-deploy.md 참고)
+      # dnsPolicy: "None"
+      # dnsConfig:
+      #   nameservers:
+      #     - "10.0.0.53"
+      containers:
+        - name: collector
+          image: <YOUR_REGISTRY>/vcf-billing-collector:<TAG>
+          envFrom:
+            - secretRef:
+                name: vcf-billing-secret
+            - configMapRef:
+                name: vcf-billing-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
+          # docker/collector/healthcheck.sh를 그대로 재사용 - 마지막 수집 사이클
+          # 이후 경과 시간을 파일 타임스탬프로 확인하는 방식(이미지에 이미 포함됨).
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/collector-healthcheck.sh"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

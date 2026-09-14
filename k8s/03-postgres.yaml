@@ -1,0 +1,88 @@
+# [v4.11] PostgreSQL 16 - 클러스터 내부 StatefulSet (docker-compose.yml의 db
+# 서비스와 동일한 역할). Billing DB/Operations DB를 물리적으로 분리하지 않는
+# 기본 배포에서는 이 StatefulSet 하나가 두 논리 DB를 모두 담는다 (v4.9 설계 - 값을
+# 바꾸지 않는 한 기존과 동일하게 동작).
+#
+# 별도 관리형 PostgreSQL(RDS 등)을 쓰고 싶다면 이 파일 전체를 적용하지 말고,
+# k8s/01-secret.yaml의 DATABASE_URL만 그 서버를 가리키도록 바꾸면 된다 -
+# 05/06/07번 매니페스트는 DATABASE_URL 값에 의존할 뿐 이 StatefulSet의 존재를
+# 전제하지 않는다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vcf-billing-postgres
+  namespace: vcf-billing
+  labels:
+    app: vcf-billing-postgres
+spec:
+  clusterIP: None  # Headless - StatefulSet 파드에 안정적인 DNS(vcf-billing-postgres-0. ...)를 부여
+  selector:
+    app: vcf-billing-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vcf-billing-postgres
+  namespace: vcf-billing
+spec:
+  serviceName: vcf-billing-postgres
+  replicas: 1  # PostgreSQL 자체 복제/HA 없이 단일 인스턴스 - README "한계"와 동일한 전제
+  selector:
+    matchLabels:
+      app: vcf-billing-postgres
+  template:
+    metadata:
+      labels:
+        app: vcf-billing-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: vcf-billing-secret  # POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              # PostgreSQL 컨테이너가 마운트 루트에 직접 데이터를 두면 lost+found 등
+              # 기존 파일 때문에 "initdb 대상 디렉터리가 비어있지 않음" 오류가 날 수
+              # 있어, 공식 이미지 관례대로 하위 폴더를 PGDATA로 지정한다.
+              subPath: pgdata
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # 클러스터 기본 StorageClass를 그대로 쓴다. 기본 StorageClass가 없거나
+        # 다른 것을 지정해야 한다면 아래 주석을 해제하고 실제 이름을 채운다
+        # (vSphere CSI 등 - docs/k8s-deploy.md "스토리지" 참고).
+        # storageClassName: "your-storage-class"
+        resources:
+          requests:
+            # 실 운영 규모(테넌트/프로젝트/VM 수, 전원상태 이력 보관 기간)에 맞춰
+            # 조정 - PowerSample은 수집 주기마다 VM당 1행씩 계속 쌓인다.
+            storage: 20Gi

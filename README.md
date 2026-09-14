@@ -126,6 +126,8 @@ docker-compose.yml      [v4.0] db/migrate/api/collector/frontend 5개 서비스 
 requirements-api.txt, requirements-collector.txt   [v4.0] 컨테이너별 최소 의존성
                         (requirements.txt는 venv 레거시 배포용 통합본으로 유지)
 docs/docker-deploy.md   [v4.0] Docker Compose 배포 전체 절차 (신규 설치 기준)
+k8s/                    [v4.11] Kubernetes 배포용 순수 YAML 매니페스트 (00~07번)
+docs/k8s-deploy.md      [v4.11] Kubernetes 배포 전체 절차
 legacy/                 [레거시] v3.x venv+systemd 배포 절차와 systemd 유닛
 ```
 
@@ -371,6 +373,15 @@ docker compose exec api python -m app.seed_data --days 14   # 샘플 데이터 �
 브라우저에서 http://localhost:8080 접속 (frontend 컨테이너). Ubuntu 서버에 실제
 배포하는 전체 절차(사전 준비 패키지, nginx+certbot TLS, 개별 서비스 재배포,
 기존 SQLite 데이터 이관 포함)는 `docs/docker-deploy.md`를 참고하세요.
+
+### Kubernetes (v4.11, 단일 서버가 아니라 클러스터에 배포하는 경우)
+
+단일 Docker Compose 서버 대신 기존 Kubernetes 클러스터에 배포하고 싶다면
+`k8s/` 아래의 순수 YAML 매니페스트(00~07번, Helm/Kustomize 불필요)를 사용하세요.
+db/migrate/api/collector/frontend 5개 컴포넌트 구성은 Docker Compose와 동일하며,
+이미지도 같은 Dockerfile(`docker/{api,collector,frontend}/Dockerfile`)을 그대로
+빌드해서 씁니다. 전체 절차(이미지 빌드/푸시, Secret 설정, 배포 순서, 외부 노출,
+기존 배포에서 데이터 이관)는 `docs/k8s-deploy.md`를 참고하세요.
 
 ### venv (docker-compose 없이 빠르게 로컬 확인만 하고 싶을 때)
 

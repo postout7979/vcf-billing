@@ -1,0 +1,86 @@
+# [v4.11] FastAPI 백엔드 (docker-compose.yml의 api 서비스와 동일).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vcf-billing-api
+  namespace: vcf-billing
+  labels:
+    app: vcf-billing-api
+spec:
+  type: ClusterIP  # 클러스터 내부(frontend의 Nginx)에서만 접근 - 외부 노출은 07-frontend.yaml
+  selector:
+    app: vcf-billing-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcf-billing-api
+  namespace: vcf-billing
+spec:
+  replicas: 1  # 상태는 전부 DB에 있어 그냥 늘려도 되지만(각 파드가 API_WORKERS개 uvicorn 워커도 함께 띄움), 처음에는 1로 시작해 필요시 늘리는 것을 권장
+  selector:
+    matchLabels:
+      app: vcf-billing-api
+  template:
+    metadata:
+      labels:
+        app: vcf-billing-api
+    spec:
+      # [v4.1의 Docker DOCKER_DNS_1/2와 동일한 목적] 연동 계정 등록/수정/"가져오기"
+      # 시 사내 전용 DNS 존에 있는 VCF Operations 호스트명을 이 파드가 해석해야
+      # 한다. 대부분의 클러스터는 CoreDNS가 알아서 사내 DNS로 포워딩해주지만,
+      # 만약 연동 시 "Temporary failure in name resolution" 에러가 나면 아래
+      # dnsConfig 주석을 해제하고 사내 DNS 서버 IP를 채운다
+      # (docs/k8s-deploy.md "DNS 해석 문제" 참고).
+      # dnsPolicy: "None"
+      # dnsConfig:
+      #   nameservers:
+      #     - "10.0.0.53"   # 사내 DNS 서버 IP로 교체
+      #   searches:
+      #     - "vcf-billing.svc.cluster.local"
+      #     - "svc.cluster.local"
+      #     - "cluster.local"
+      #   options:
+      #     - name: ndots
+      #       value: "5"
+      containers:
+        - name: api
+          image: <YOUR_REGISTRY>/vcf-billing-api:<TAG>
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: vcf-billing-secret
+            - configMapRef:
+                name: vcf-billing-config
+          env:
+            # collector는 별도 Deployment(06-collector.yaml)로 뜨므로 API 파드
+            # 안에서는 중복 실행하지 않는다 (docker-compose.yml과 동일한 이유).
+            - name: RUN_COLLECTOR_IN_PROCESS
+              value: "false"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5

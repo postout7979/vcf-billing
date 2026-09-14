@@ -1,0 +1,40 @@
+# [v4.11] 스키마 생성 + 기본 admin 계정 보장 (docker-compose.yml의 migrate 서비스와
+# 동일). api/collector 여러 파드가 동시에 스키마/기본 계정을 만들려다 경쟁하는 것을
+# 막기 위해 반드시 이 Job이 먼저 성공적으로 끝난 뒤에 05-api.yaml/06-collector.yaml을
+# 적용해야 한다 - Kubernetes는 Job과 Deployment 사이의 순서를 자동으로 보장해주지
+# 않으므로, docs/k8s-deploy.md의 배포 절차(`kubectl wait --for=condition=complete`)를
+# 반드시 그 순서대로 따를 것.
+#
+# 이미지 태그를 바꿔 재배포할 때마다(코드 갱신 시) 이 Job을 지우고 다시 적용해야
+# 한다 - Job의 파드 템플릿은 불변(immutable) 필드라 이미지가 바뀐 상태로
+# `kubectl apply`만 다시 하면 오류가 난다:
+#   kubectl delete job/vcf-billing-migrate -n vcf-billing --ignore-not-found
+#   kubectl apply -f k8s/04-migrate-job.yaml
+#   kubectl wait --for=condition=complete job/vcf-billing-migrate -n vcf-billing --timeout=180s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vcf-billing-migrate
+  namespace: vcf-billing
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          # api 이미지와 코드/의존성이 완전히 같으므로 그대로 재사용 (docker-compose.yml과 동일한 이유)
+          image: <YOUR_REGISTRY>/vcf-billing-api:<TAG>
+          command: ["python", "-m", "app.bootstrap_db"]
+          envFrom:
+            - secretRef:
+                name: vcf-billing-secret
+            - configMapRef:
+                name: vcf-billing-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"

@@ -1,0 +1,130 @@
+# [v4.11] 정적 파일(Nginx) + /api/* 리버스 프록시 (docker-compose.yml의 frontend
+# 서비스와 동일한 역할). 이미지는 docker/frontend/Dockerfile을 그대로 재사용하되,
+# nginx.conf만 아래 ConfigMap으로 덮어써서 Kubernetes 환경에 맞게 바꾼다.
+#
+# [nginx.conf를 왜 그대로 안 쓰는가] docker/frontend/nginx.conf는 Docker 임베디드
+# DNS(127.0.0.11)로 매 요청마다 "api" 컨테이너의 IP를 다시 조회하는 트릭을 쓴다 -
+# Docker Compose에서는 컨테이너를 재배포하면 내부 IP가 바뀌기 때문이다. Kubernetes
+# Service(예: vcf-billing-api)는 백엔드 파드가 재시작/재배포되어도 ClusterIP 자체는
+# 절대 바뀌지 않고, kube-proxy가 그 뒤의 실제 파드로 트래픽을 라우팅해준다 - 즉
+# Docker판 트릭이 애초에 필요 없는 문제다. 그래서 Kubernetes용 nginx.conf는 단순히
+# `proxy_pass http://vcf-billing-api:8000;`로 고정하면 된다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vcf-billing-frontend-nginx
+  namespace: vcf-billing
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        client_max_body_size 10m;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # 월별 결산서 PDF(reportlab) 생성은 VM이 많은 프로젝트일수록 시간이 걸릴
+        # 수 있어 기본 프록시 타임아웃보다 넉넉하게 잡는다 (docker/frontend/nginx.conf와 동일 기준).
+        location ~ ^/api/(me|admin)/.*statement\.pdf$ {
+            proxy_pass http://vcf-billing-api:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 120s;
+        }
+
+        location /api/ {
+            proxy_pass http://vcf-billing-api:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 60s;
+        }
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+
+        access_log /var/log/nginx/access.log;
+        error_log  /var/log/nginx/error.log;
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcf-billing-frontend
+  namespace: vcf-billing
+spec:
+  replicas: 2  # 정적 파일 + 리버스 프록시뿐인 무상태(stateless) 컴포넌트라 자유롭게 늘려도 안전
+  selector:
+    matchLabels:
+      app: vcf-billing-frontend
+  template:
+    metadata:
+      labels:
+        app: vcf-billing-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: <YOUR_REGISTRY>/vcf-billing-frontend:<TAG>
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            # 이미지에 빌드 시점에 baked-in된 /etc/nginx/conf.d/default.conf를
+            # 위 ConfigMap으로 덮어쓴다 - 이미지 자체는 docker-compose 배포와
+            # 100% 동일한 것을 그대로 재사용할 수 있다.
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: vcf-billing-frontend-nginx
+---
+# [사용자 확인: LoadBalancer 서비스 선택] 사내망 사용자는 클러스터가 할당하는
+# externalIP(클라우드 LB 또는 MetalLB 등)로 접속한다. TLS 종료는 이 매니페스트의
+# 범위 밖이다 - 기존 Docker/Ubuntu 배포에서 호스트 nginx+certbot이 TLS를 맡던 것과
+# 같은 원칙으로, 이 LoadBalancer 앞단(사내 리버스 프록시/L7 로드밸런서 등)에서
+# HTTPS를 종료한 뒤 이 Service의 80번 포트로 넘기는 구조를 권장한다
+# (docs/k8s-deploy.md "외부 노출/TLS" 참고).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vcf-billing-frontend
+  namespace: vcf-billing
+  labels:
+    app: vcf-billing-frontend
+spec:
+  type: LoadBalancer
+  selector:
+    app: vcf-billing-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
