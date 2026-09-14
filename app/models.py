@@ -135,6 +135,12 @@ class Project(Base):
     rate_card: Mapped["RateCard"] = relationship(
         back_populates="project", uselist=False, cascade="all, delete-orphan"
     )
+    # [v4.10.1 버그 수정] RateCardHistory는 project_id를 raw FK로만 가질 뿐 이 relationship이
+    # 없었다 - 그래서 프로젝트/테넌트 삭제 시 이력 행이 남아있는 채로 DELETE가 나가고,
+    # PostgreSQL은 (SQLite와 달리 기본적으로 FK 제약을 강제하므로) "rate_card_history_project_id_fkey"
+    # 위반으로 삭제를 거부해 관리자 화면에 Internal error가 떴다. rate_card와 동일하게
+    # cascade="all, delete-orphan"을 추가해 프로젝트 삭제 시 이력도 함께 지워지도록 한다.
+    rate_card_history: Mapped[list["RateCardHistory"]] = relationship(cascade="all, delete-orphan")
 
 
 class RateCard(Base):
