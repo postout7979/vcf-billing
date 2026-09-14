@@ -43,6 +43,12 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
     env_file: .env
+    environment:
+      # [v4.9] Operations DB(VM 인벤토리/전원상태) 전용 접속 문자열 - 비어 있으면
+      # DATABASE_URL(Billing DB)과 같은 물리 DB로 폴백한다 (app/config.py 참고).
+      # migrate 서비스가 Billing DB뿐 아니라 Operations DB 테이블도 함께 생성해야 하므로
+      # 여기도 전달한다.
+      OPERATIONS_DATABASE_URL: ${OPERATIONS_DATABASE_URL:-}
     dns:
       # [v4.1] See DOCKER_DNS_1/DOCKER_DNS_2 in .env.example - without this,
       # containers inherit the host's /etc/resolv.conf, which on Ubuntu is
@@ -66,6 +72,11 @@ services:
     environment:
       # collector는 별도 컨테이너로 뜨므로 API 프로세스 안에서는 중복 실행하지 않는다.
       RUN_COLLECTOR_IN_PROCESS: "false"
+      # [v4.9] OPERATIONS_DATABASE_URL은 .env에 정의되어 있으면 env_file로 이미 전달되지만,
+      # 미설정(빈 값) 상태에서도 이 항목이 존재해야 컨테이너 안에서 "설정 안 됨"이 명확히
+      # 구분된다 - app/config.py의 effective_operations_database_url()이 빈 값이면
+      # DATABASE_URL로 폴백한다.
+      OPERATIONS_DATABASE_URL: ${OPERATIONS_DATABASE_URL:-}
     dns:
       # [v4.1] Needed to resolve the VCF Operations hostname
       # when an integration account is created/edited or "가져오기" (sync
@@ -83,6 +94,11 @@ services:
       context: .
       dockerfile: docker/collector/Dockerfile
     env_file: .env
+    environment:
+      # [v4.9] Operations DB(VM 인벤토리/전원상태 수집 대상) 전용 접속 문자열 - 비어
+      # 있으면 DATABASE_URL(Billing DB)과 같은 물리 DB로 폴백한다 (app/config.py 참고).
+      # collector가 실제로 VM/PowerSample을 쓰는 대상이 바로 이 DB다.
+      OPERATIONS_DATABASE_URL: ${OPERATIONS_DATABASE_URL:-}
     dns:
       # [v4.1] Needed to resolve the VCF Operations hostname
       # on every collection cycle - see DOCKER_DNS_1/DOCKER_DNS_2 in

@@ -19,7 +19,7 @@ from app.billing.aggregator import (
     default_period,
     month_to_date_period,
 )
-from app.database import SessionLocal
+from app.database import OpsSessionLocal, SessionLocal
 from app.models import User
 
 
@@ -68,12 +68,15 @@ def _project_to_dict(result, s, e):
 
 
 def main():
+    # [v4.9] Billing DB(Project/RateCard/User)와 Operations DB(VM/PowerSample)가
+    # 분리되면서 aggregator 호출에는 두 세션이 모두 필요하다.
     db = SessionLocal()
+    ops_db = OpsSessionLocal()
     out = {"periods": {}}
 
     for period_key, days in [("7d", 7), ("30d", 30)]:
         s, e = default_period(days)
-        projects = compute_all_projects_usage(db, s, e)
+        projects = compute_all_projects_usage(db, ops_db, s, e)
         project_dicts = [_project_to_dict(p, s, e) for p in projects]
         out["periods"][period_key] = {
             "period_start": s.isoformat(),
@@ -83,7 +86,7 @@ def main():
 
     # 이번 달(1일~오늘)
     s, e = month_to_date_period()
-    projects = compute_all_projects_usage(db, s, e)
+    projects = compute_all_projects_usage(db, ops_db, s, e)
     out["periods"]["mtd"] = {
         "period_start": s.isoformat(),
         "period_end": e.isoformat(),
@@ -91,11 +94,11 @@ def main():
     }
 
     # 데이터가 존재하는 캘린더 월 전체 (월 선택 드롭다운용)
-    months = available_months(db)
+    months = available_months(db, ops_db)
     for ym in months:
         year_str, month_str = ym.split("-")
         s, e = calendar_month_period(int(year_str), int(month_str))
-        projects = compute_all_projects_usage(db, s, e)
+        projects = compute_all_projects_usage(db, ops_db, s, e)
         out["periods"][f"month:{ym}"] = {
             "period_start": s.isoformat(),
             "period_end": e.isoformat(),
@@ -115,6 +118,7 @@ def main():
     ]
 
     db.close()
+    ops_db.close()
 
     with open("/root/vcf-billing-portal/demo_data.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=None, separators=(",", ":"))

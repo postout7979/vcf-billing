@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.integrations.base import TagRef, VCFOpsClient, VMSnapshot
 from app.integrations.mock_client import build_mock_client
-from app.models import IntegrationAccount
+from app.models_ops import IntegrationAccount
 
 
 def build_client_for_integration_account(account: IntegrationAccount) -> VCFOpsClient:

@@ -435,7 +435,12 @@ class CollectorStatusOut(BaseModel):
 
 class SystemStatusOut(BaseModel):
     generated_at: dt.datetime
+    # [v4.9] db는 Billing DB(Tenant/Project/User/RateCard 등), operations_db는
+    # Operations DB(VirtualMachine/PowerSample/IntegrationAccount 등) - 두 데이터베이스가
+    # 물리적으로 분리될 수 있게 되면서 항상 둘 다 채운다 (기본 설정에서는 같은 물리 DB를
+    # 가리키므로 size_bytes 등이 겹쳐 보일 수 있으나, 테이블 목록은 각자 관련된 것만 표시).
     db: DbStatusOut
+    operations_db: DbStatusOut
     api_process: ApiProcessStatusOut
     collector: CollectorStatusOut
 
@@ -539,5 +544,35 @@ class LocalDbSetupRequest(BaseModel):
 class LocalDbSetupResult(BaseModel):
     ok: bool
     wiped: bool
+    message: str
+    next_steps: list[str] = []
+
+
+# ==========================================================================
+# [v4.9] Operations DB 설정 마법사 - "로컬 추가 데이터베이스" / "외부 데이터베이스"
+#
+# Billing DB(기존 v4.6/v4.8 "데이터베이스" 화면)와는 별개로, Operations DB(VM 인벤토리/
+# 전원상태 수집 데이터 - app/models_ops.py)를 어디에 둘지 고르는 새 선택지. "외부
+# 데이터베이스"는 기존 ExternalDbConnectionRequest/ExternalDbMigrateRequest/
+# ExternalDbMigrateResult를 그대로 재사용한다(대상 metadata만 Operations DB로 바뀜).
+# ==========================================================================
+
+
+class OperationsDbLocalSetupRequest(BaseModel):
+    """"로컬 추가 데이터베이스" 선택 시 제출하는 폼.
+
+    db_name은 Billing DB가 PostgreSQL일 때만 의미가 있다 (같은 서버에 새로 만들 DB
+    이름 - 생략하면 기본값 "vcfbilling_ops"). Billing DB가 SQLite 폴백이면 이 값은
+    무시되고 항상 billing.db 옆에 operations.db 파일을 만든다.
+    """
+
+    confirm: bool = False
+    db_name: str | None = Field(default=None, max_length=63)
+
+
+class OperationsDbLocalSetupResult(BaseModel):
+    ok: bool
+    operations_database_url: str
+    operations_database_url_masked: str
     message: str
     next_steps: list[str] = []

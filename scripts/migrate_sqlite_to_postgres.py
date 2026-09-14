@@ -5,10 +5,20 @@ Docker/PostgreSQL 아키텍처로 전환하기 전, 이미 SQLite 기반으로 �
 데이터를 새 PostgreSQL 컨테이너로 옮길 때 사용한다. 신규 설치(아직 SQLite에 데이터가
 없는 경우)라면 이 스크립트를 실행할 필요 없이 그냥 docker compose로 새로 시작하면 된다.
 
+[v4.9] Billing DB(app/models.py, Base.metadata)와 Operations DB(app/models_ops.py,
+OpsBase.metadata)가 분리되면서, 이 스크립트도 --scope 인자로 어느 쪽 테이블 집합을
+옮길지 선택한다. v4.9 이전에 만들어진 SQLite 파일은 두 세트의 테이블이 파일 하나에
+전부 들어있으므로("분리"가 이번에 처음 생긴 개념이라, 예전 파일에는 애초에 분리라는
+것 자체가 없었다), 그런 레거시 단일 파일을 완전히 새 아키텍처로 옮기려면 같은 소스
+SQLite 파일을 대상으로 이 스크립트를 --scope billing과 --scope operations로 "두 번"
+실행해서 각각 다른 PostgreSQL 대상(DATABASE_URL 용, OPERATIONS_DATABASE_URL 용)에
+넣어야 한다 (두 스코프를 같은 PostgreSQL DB로 보내면 두 세트 모두 한 물리 DB에
+합쳐지는 것도 가능 - v4.9의 "기본값은 같은 물리 DB" 동작과 동일해진다).
+
 동작 방식:
-1. app/models.py의 Base.metadata에 정의된 모든 테이블을 외래키 의존성 순서대로
-   (Base.metadata.sorted_tables) 순회한다 - 부모 테이블을 자식보다 먼저 적재해야
-   FK 제약을 위반하지 않는다.
+1. --scope에 해당하는 metadata(Base.metadata 또는 OpsBase.metadata)에 정의된 모든
+   테이블을 외래키 의존성 순서대로(metadata.sorted_tables) 순회한다 - 부모 테이블을
+   자식보다 먼저 적재해야 FK 제약을 위반하지 않는다.
 2. 각 테이블의 모든 행을 SQLite에서 읽어 그대로 PostgreSQL에 적재한다 (ORM을 거치지
    않고 Core 레벨 insert를 사용 - 컬럼 값을 그대로 복사하는 것이 목적이라 모델의
    default/validate 로직이 다시 실행될 필요가 없음).
@@ -23,13 +33,19 @@ Docker/PostgreSQL 아키텍처로 전환하기 전, 이미 SQLite 기반으로 �
     # 2) PostgreSQL 컨테이너만 먼저 띄운다
     docker compose up -d db
     # 3) 새 PostgreSQL이 비어있는 상태에서, api 이미지를 재사용해 이 스크립트를 실행
+    #    - Billing DB 테이블 이관 (DATABASE_URL 대상):
     docker compose run --rm -e DATABASE_URL="$(grep ^DATABASE_URL .env | cut -d= -f2-)" \\
         -v "$(pwd)/data:/app/data:ro" api python scripts/migrate_sqlite_to_postgres.py \\
-        --sqlite-path /app/data/billing.db
+        --scope billing --sqlite-path /app/data/billing.db
+    #    - Operations DB 테이블도 옮겨야 한다면(레거시 단일 파일), 같은 소스 파일을
+    #      OPERATIONS_DATABASE_URL 대상으로 한 번 더 실행:
+    docker compose run --rm -e DATABASE_URL="$(grep ^OPERATIONS_DATABASE_URL .env | cut -d= -f2-)" \\
+        -v "$(pwd)/data:/app/data:ro" api python scripts/migrate_sqlite_to_postgres.py \\
+        --scope operations --sqlite-path /app/data/billing.db
     # 4) 검증 후 api/collector 컨테이너를 정상 기동
     docker compose up -d
 
-주의: 대상 PostgreSQL DB는 반드시 비어 있어야 한다 (Base.metadata.create_all로 방금
+주의: 대상 PostgreSQL DB는 반드시 비어 있어야 한다 (metadata.create_all로 방금
 생성된, 데이터가 없는 상태). 이미 데이터가 있는 PostgreSQL에 실행하면 PK 충돌로 실패한다.
 """
 from __future__ import annotations
@@ -40,21 +56,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import create_engine, insert, select, text  # noqa: E402
+from sqlalchemy import MetaData, create_engine, insert, select, text  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
-from app.database import Base  # noqa: E402
-import app.models  # noqa: E402,F401  (Base.metadata에 테이블을 등록시키기 위한 import)
+from app.database import Base, OpsBase  # noqa: E402
+import app.models  # noqa: E402,F401  (Base.metadata에 Billing DB 테이블을 등록시키기 위한 import)
+import app.models_ops  # noqa: E402,F401  (OpsBase.metadata에 Operations DB 테이블을 등록시키기 위한 import)
+
+_SCOPE_METADATA: dict[str, MetaData] = {
+    "billing": Base.metadata,
+    "operations": OpsBase.metadata,
+}
 
 
-def migrate(sqlite_path: str, postgres_url: str) -> None:
+def migrate(sqlite_path: str, postgres_url: str, scope: str) -> None:
+    metadata = _SCOPE_METADATA[scope]
     sqlite_engine = create_engine(f"sqlite:///{sqlite_path}")
     postgres_engine = create_engine(postgres_url)
 
-    Base.metadata.create_all(bind=postgres_engine)
+    metadata.create_all(bind=postgres_engine)
 
     with sqlite_engine.connect() as src, postgres_engine.begin() as dst:
-        for table in Base.metadata.sorted_tables:
+        for table in metadata.sorted_tables:
             rows = src.execute(select(table)).mappings().all()
             if not rows:
                 print(f"  - {table.name}: 0행 (건너뜀)")
@@ -79,11 +102,22 @@ def migrate(sqlite_path: str, postgres_url: str) -> None:
                     )
                 )
 
-    print("마이그레이션 완료.")
+    print(f"마이그레이션 완료 (scope={scope}).")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SQLite -> PostgreSQL 1회성 데이터 마이그레이션")
+    parser.add_argument(
+        "--scope",
+        choices=["billing", "operations"],
+        required=True,
+        help=(
+            "옮길 테이블 집합. billing=Tenant/Project/RateCard/User 등(app/models.py), "
+            "operations=IntegrationAccount~VirtualMachine/PowerSample 등(app/models_ops.py). "
+            "v4.9 이전 단일 SQLite 파일에는 두 집합이 모두 들어있으므로, 완전히 옮기려면 "
+            "같은 --sqlite-path에 대해 이 스크립트를 두 --scope로 각각 한 번씩 실행하세요."
+        ),
+    )
     parser.add_argument(
         "--sqlite-path",
         default=str(Path(__file__).resolve().parent.parent / "data" / "billing.db"),
@@ -92,7 +126,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--postgres-url",
         default=None,
-        help="대상 PostgreSQL URL (기본: .env의 DATABASE_URL 설정값 사용)",
+        help=(
+            "대상 PostgreSQL URL (기본: .env의 DATABASE_URL 설정값 사용 - --scope operations를 "
+            "쓸 때는 보통 OPERATIONS_DATABASE_URL 값을 명시적으로 넘겨야 한다)"
+        ),
     )
     args = parser.parse_args()
 
@@ -109,5 +146,5 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    print(f"SQLite({args.sqlite_path}) -> PostgreSQL 마이그레이션 시작")
-    migrate(args.sqlite_path, postgres_url)
+    print(f"SQLite({args.sqlite_path}) -> PostgreSQL 마이그레이션 시작 (scope={args.scope})")
+    migrate(args.sqlite_path, postgres_url, args.scope)

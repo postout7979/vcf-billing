@@ -23,7 +23,7 @@ const state = {
   charts: {},
   overview: null, // 현재 화면(관리자 또는 사용자)에 표시 중인 AdminOverviewOut 형태 응답
   adminTenantFilter: "", // 관리자 화면의 테넌트 필터. "" = 전체(교차 확인)
-  adminPage: "overview", // 관리자 메뉴 현재 탭: overview | tenants | integrations | system
+  adminPage: "overview", // 관리자 메뉴 현재 탭: overview | projects | downsizing | tenants | users | integrations | system | database
   systemStatusTimer: null, // [v4.4] "시스템 상태" 탭이 열려 있는 동안만 도는 30초 자동 새로고침 타이머
   tenants: [], // 관리자: 테넌트 목록 캐시
   currentTenantDetailId: null, // 관리자: 현재 열려 있는 테넌트 상세 관리 패널의 테넌트 id
@@ -45,6 +45,14 @@ const state = {
   resettingUserId: null, // 현재 열려 있는 "비밀번호 초기화" 모달의 대상 사용자 id
   // [v4.8] 로컬 DB 설정 팝업이 마지막으로 확인한 엔진 종류 (sqlite면 비밀번호 변경 UI를 숨김)
   localDbSetupIsSqlite: false,
+  // [v4.9] 초기 설정 마법사 진행 상태 - wizardActive는 지금 마법사 흐름 중인지(하위 팝업이
+  // 앞을 가리고 있어도 true 유지), wizardPendingReturn은 하위 팝업(로컬/외부 DB 설정)을
+  // 닫았을 때 마법사의 어디로 돌아갈지("finish" 또는 다음 단계 번호)를 기억한다.
+  wizardActive: false,
+  wizardPendingReturn: null,
+  // [v4.9] 외부 PostgreSQL 연결 팝업(#external-db-modal)은 Billing DB/Operations DB
+  // 양쪽에서 공용으로 열리므로, 지금 어느 쪽을 대상으로 하는지 기억해둔다.
+  externalDbTarget: "billing",
 };
 
 // 기간/월 선택 UI를 빠르게 연속 조작할 때, 먼저 시작된(느린) 흐름이 나중에 끝나
@@ -422,33 +430,61 @@ async function boot() {
   document.getElementById("database-status-refresh-btn").addEventListener("click", loadDatabaseOverview);
   document.getElementById("database-status-modal-close").addEventListener("click", closeDatabaseStatusModal);
   document.getElementById("database-export-btn").addEventListener("click", onDatabaseExport);
-  document.getElementById("external-db-open-btn").addEventListener("click", openExternalDbModal);
+  document.getElementById("external-db-open-btn").addEventListener("click", () => openExternalDbModal("billing"));
   document.getElementById("external-db-modal-close").addEventListener("click", closeExternalDbModal);
   document.getElementById("external-db-test-btn").addEventListener("click", onExternalDbTest);
   document.getElementById("external-db-form").addEventListener("submit", onExternalDbMigrateSubmit);
   document.getElementById("external-db-migrate-copy-btn").addEventListener("click", onCopyExternalDbUrl);
 
-  // [v4.8] 최초 로그인 DB 설정 게이트 + 로컬 DB 설정(비밀번호 변경/전체 초기화) 팝업
-  document.getElementById("initial-setup-local-btn").addEventListener("click", () => {
-    closeInitialDbSetupModal();
-    openLocalDbSetupModal();
-  });
-  document.getElementById("initial-setup-external-btn").addEventListener("click", () => {
-    closeInitialDbSetupModal();
-    markInitialDbSetupSeen();
-    openExternalDbModal();
-  });
-  document.getElementById("initial-setup-skip-btn").addEventListener("click", () => {
-    closeInitialDbSetupModal();
-    markInitialDbSetupSeen();
-    showToast('나중에 "데이터베이스" 메뉴에서 다시 설정할 수 있습니다.');
-  });
+  // [v4.8] 로컬 DB 설정(비밀번호 변경/전체 초기화) 팝업 - "데이터베이스" 탭의 "현재 DB 상태"
+  // 팝업과 초기 설정 마법사 2단계에서 공용으로 연다.
   document.getElementById("database-status-local-setup-btn").addEventListener("click", () => {
     closeDatabaseStatusModal();
     openLocalDbSetupModal();
   });
   document.getElementById("local-db-setup-modal-close").addEventListener("click", closeLocalDbSetupModal);
   document.getElementById("local-db-setup-form").addEventListener("submit", onLocalDbSetupFormSubmit);
+
+  // [v4.9] Operations DB - "데이터베이스" 탭 전용 진입점 (마법사 3단계와 별개로 언제든 재설정 가능)
+  document.getElementById("operations-database-status-open-btn").addEventListener("click", openOperationsDatabaseStatusModal);
+  document.getElementById("operations-database-status-refresh-btn").addEventListener("click", loadOperationsDatabaseOverview);
+  document.getElementById("operations-database-status-modal-close").addEventListener("click", closeOperationsDatabaseStatusModal);
+  document.getElementById("operations-database-local-setup-open-btn").addEventListener("click", () => openOperationsLocalDbModal());
+  document.getElementById("operations-local-db-modal-close").addEventListener("click", closeOperationsLocalDbModal);
+  document.getElementById("operations-local-db-form").addEventListener("submit", onOperationsLocalDbFormSubmit);
+  document.getElementById("operations-external-db-open-btn").addEventListener("click", () => openExternalDbModal("operations"));
+
+  // [v4.8→v4.9] 최초 로그인 설정 마법사 (1단계: 관리자 비밀번호 변경 / 2단계: Billing DB /
+  // 3단계: Operations DB) - 하위 팝업(로컬·외부 DB 설정)을 열 때는 마법사 팝업 자체를
+  // 잠시 숨기고, 그 팝업이 닫히면 wizardReturnFromSubModal()이 다음 단계로 이어간다.
+  document.getElementById("wizard-password-form").addEventListener("submit", onWizardPasswordSubmit);
+  document.getElementById("wizard-password-skip-btn").addEventListener("click", () => showWizardStep(2));
+
+  document.getElementById("wizard-billing-local-btn").addEventListener("click", () => {
+    document.getElementById("initial-db-setup-modal").hidden = true;
+    state.wizardPendingReturn = 3;
+    openLocalDbSetupModal();
+  });
+  document.getElementById("wizard-billing-external-btn").addEventListener("click", () => {
+    document.getElementById("initial-db-setup-modal").hidden = true;
+    state.wizardPendingReturn = 3;
+    openExternalDbModal("billing");
+  });
+  document.getElementById("wizard-step2-back-btn").addEventListener("click", () => showWizardStep(1));
+  document.getElementById("wizard-step2-skip-btn").addEventListener("click", () => showWizardStep(3));
+
+  document.getElementById("wizard-ops-local-btn").addEventListener("click", () => {
+    document.getElementById("initial-db-setup-modal").hidden = true;
+    state.wizardPendingReturn = "finish";
+    openOperationsLocalDbModal();
+  });
+  document.getElementById("wizard-ops-external-btn").addEventListener("click", () => {
+    document.getElementById("initial-db-setup-modal").hidden = true;
+    state.wizardPendingReturn = "finish";
+    openExternalDbModal("operations");
+  });
+  document.getElementById("wizard-step3-back-btn").addEventListener("click", () => showWizardStep(2));
+  document.getElementById("wizard-step3-skip-btn").addEventListener("click", finishWizard);
 
   if (state.token) {
     try {
@@ -923,7 +959,11 @@ function switchAdminPage(page) {
   // 안 그러면 화면에 보이지도 않는 탭을 위해 30초마다 불필요한 API 호출이 계속 나간다.
   if (page !== "system") stopSystemStatusAutoRefresh();
 
-  if (page === "overview") {
+  // [v4.9] "프로젝트"/"저성능 VM" 탭은 기존 개요 화면에 있던 카드를 그대로 옮긴 것뿐이라,
+  // 데이터 소스가 동일한 GET /admin/overview(+forecast) 응답이다 - loadAdminView()가
+  // admin-project-table-body/admin-downsizing-table-body를 채우는데, 이 두 tbody가
+  // 이제 어느 탭의 section 안에 있든(개요/프로젝트/저성능 VM) 그대로 동작한다.
+  if (page === "overview" || page === "projects" || page === "downsizing") {
     loadAdminView();
   } else if (page === "tenants") {
     loadTenantManagement();
@@ -1036,44 +1076,125 @@ function closeDatabaseStatusModal() {
   document.getElementById("database-status-modal").hidden = true;
 }
 
-function openExternalDbModal() {
+/** [v4.9] Billing DB(target="billing", 기본값)와 Operations DB(target="operations")
+ * 양쪽에서 공용으로 여는 팝업 - 제목/설명만 바꿔 끼우고, 실제 제출 대상 엔드포인트는
+ * onExternalDbMigrateSubmit()이 state.externalDbTarget을 보고 고른다. */
+function openExternalDbModal(target = "billing") {
+  state.externalDbTarget = target;
+  const isOps = target === "operations";
+  document.getElementById("external-db-modal-title").textContent = isOps
+    ? "Operations DB - 외부 PostgreSQL 연결"
+    : "Billing DB - 외부 PostgreSQL 연결";
+  document.getElementById("external-db-modal-desc").textContent = isOps
+    ? "VM 인벤토리/전원상태 데이터 접속 테스트 및 마이그레이션"
+    : "테넌트/프로젝트/요금 데이터 접속 테스트 및 마이그레이션";
+  document.getElementById("external-db-form").reset();
+  document.getElementById("external-db-form").hidden = false;
+  document.getElementById("external-db-test-result").hidden = true;
+  document.getElementById("external-db-form-error").hidden = true;
+  document.getElementById("external-db-migrate-result").hidden = true;
   document.getElementById("external-db-modal").hidden = false;
 }
 
 function closeExternalDbModal() {
   document.getElementById("external-db-modal").hidden = true;
+  wizardReturnFromSubModal();
+  state.externalDbTarget = "billing";
 }
 
-/* ---------------------------- [v4.8] 최초 로그인 DB 설정 게이트 ---------------------------- */
+/* ---------------------------- [v4.8→v4.9] 최초 로그인 설정 마법사 ---------------------------- */
 
-/** admin으로 로그인할 때마다 호출 - 최초 1회(아직 안 봤을 때)만 게이트 팝업을 띄운다. */
+/** admin으로 로그인할 때마다 호출 - 최초 1회(아직 안 봤을 때)만 마법사를 띄운다. */
 async function checkInitialDbSetupGate() {
   try {
     const status = await api("/admin/setup-status");
     if (!status.initial_db_setup_seen) {
-      document.getElementById("initial-db-setup-modal").hidden = false;
+      openWizard();
     }
   } catch (_) {
-    // 조회 자체가 실패해도 게이트를 못 띄울 뿐 앱 사용은 계속할 수 있어야 하므로 조용히 무시.
+    // 조회 자체가 실패해도 마법사를 못 띄울 뿐 앱 사용은 계속할 수 있어야 하므로 조용히 무시.
   }
 }
 
-function closeInitialDbSetupModal() {
+function openWizard() {
+  state.wizardActive = true;
+  state.wizardPendingReturn = null;
+  document.getElementById("wizard-password-form").reset();
+  document.getElementById("wizard-password-error").hidden = true;
+  showWizardStep(1);
+  document.getElementById("initial-db-setup-modal").hidden = false;
+}
+
+/** 1~3 중 하나를 받아 해당 단계만 보여주고 나머지는 숨긴다. */
+function showWizardStep(step) {
+  document.getElementById("wizard-step-indicator").textContent = `${step} / 3단계`;
+  [1, 2, 3].forEach((n) => {
+    document.getElementById(`wizard-step-${n}`).hidden = n !== step;
+  });
+}
+
+/** [v4.9] 로컬/외부 DB 설정 팝업(마법사 2·3단계가 잠시 가리고 여는 하위 팝업)이 닫혔을 때
+ * 호출한다 - 마법사가 진행 중이 아니면(하위 팝업을 "데이터베이스" 탭에서 독립적으로 열었던
+ * 경우) 아무 것도 하지 않는다. */
+function wizardReturnFromSubModal() {
+  if (!state.wizardActive) return;
+  const next = state.wizardPendingReturn;
+  state.wizardPendingReturn = null;
+  if (next === "finish") {
+    finishWizard();
+  } else {
+    document.getElementById("initial-db-setup-modal").hidden = false;
+    showWizardStep(next || 1);
+  }
+}
+
+async function finishWizard() {
+  state.wizardActive = false;
+  state.wizardPendingReturn = null;
   document.getElementById("initial-db-setup-modal").hidden = true;
+  await markInitialDbSetupSeen();
+  showToast('초기 설정을 마쳤습니다. 나중에 "데이터베이스" 메뉴에서 언제든 다시 설정할 수 있습니다.');
 }
 
 async function markInitialDbSetupSeen() {
   try {
     await api("/admin/setup-status/mark-seen", { method: "POST" });
   } catch (_) {
-    /* no-op - 다음 로그인 때 게이트가 다시 뜨는 정도의 사소한 영향만 있음 */
+    /* no-op - 다음 로그인 때 마법사가 다시 뜨는 정도의 사소한 영향만 있음 */
+  }
+}
+
+/** 마법사 1단계 - 관리자 로그인 비밀번호 변경 (건너뛰기 가능). 기존 "비밀번호 변경" 팝업과
+ * 같은 PUT /auth/me/password를 재사용하되, id가 겹치지 않도록 wizard-* 필드를 따로 둔다. */
+async function onWizardPasswordSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("wizard-password-error");
+  errEl.hidden = true;
+  const currentPassword = document.getElementById("wizard-password-current").value;
+  const newPassword = document.getElementById("wizard-password-new").value;
+  const confirmPassword = document.getElementById("wizard-password-new-confirm").value;
+  if (newPassword !== confirmPassword) {
+    errEl.textContent = "새 비밀번호가 서로 일치하지 않습니다.";
+    errEl.hidden = false;
+    return;
+  }
+  try {
+    await api("/auth/me/password", {
+      method: "PUT",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    showToast("비밀번호가 변경되었습니다.", "success");
+    showWizardStep(2);
+  } catch (err) {
+    errEl.textContent = err.message || "변경에 실패했습니다.";
+    errEl.hidden = false;
   }
 }
 
 /* ---------------------------- [v4.8] 로컬 DB 설정 (비밀번호 변경 / 전체 초기화) ---------------------------- */
 
-/** 최초 설정 게이트의 "로컬 DB 설정" 버튼, 그리고 "현재 DB 상태" 팝업의 "로컬 DB 설정"
- * 버튼이 공용으로 여는 팝업 - 언제든 다시 비밀번호를 바꾸거나 초기화할 수 있다. */
+/** "데이터베이스" 탭의 "현재 DB 상태" 팝업, 그리고 초기 설정 마법사 2단계가 공용으로 여는
+ * 팝업 - 언제든 다시 비밀번호를 바꾸거나 초기화할 수 있다. */
 function openLocalDbSetupModal() {
   document.getElementById("local-db-setup-form").reset();
   document.getElementById("local-db-setup-form").hidden = false;
@@ -1085,6 +1206,7 @@ function openLocalDbSetupModal() {
 
 function closeLocalDbSetupModal() {
   document.getElementById("local-db-setup-modal").hidden = true;
+  wizardReturnFromSubModal();
 }
 
 /** 엔진이 SQLite면 "DB 계정 비밀번호"라는 개념 자체가 없으므로(파일 하나가 DB 전체),
@@ -1235,6 +1357,99 @@ async function onDatabaseExport() {
   }
 }
 
+/* ---------------------------- [v4.9] 관리자 화면 - Operations 데이터베이스 ---------------------------- */
+
+function openOperationsDatabaseStatusModal() {
+  document.getElementById("operations-database-status-modal").hidden = false;
+  loadOperationsDatabaseOverview();
+}
+
+function closeOperationsDatabaseStatusModal() {
+  document.getElementById("operations-database-status-modal").hidden = true;
+}
+
+/** GET /admin/database(Billing DB)의 Operations DB 버전 - loadDatabaseOverview()와
+ * 동일한 렌더링을 operations-database-* id들에 채운다. */
+async function loadOperationsDatabaseOverview() {
+  let data;
+  try {
+    data = await api("/admin/operations-database");
+  } catch (err) {
+    showToast(err.message, "error");
+    return;
+  }
+
+  const connLabel =
+    data.engine === "sqlite"
+      ? `파일: ${data.file_path || "-"}`
+      : `${data.host}:${data.port} / DB: ${data.database} / 사용자: ${data.username}`;
+
+  renderKpiGrid(document.getElementById("operations-database-current-kpis"), [
+    { label: "엔진", value: data.engine === "postgresql" ? "PostgreSQL" : "SQLite", sub: data.server_version || "", highlight: true },
+    { label: "전체 크기", value: fmtBytes(data.size_bytes), sub: "" },
+    { label: "연결 정보", value: connLabel, sub: "" },
+  ]);
+
+  const tbody = document.getElementById("operations-database-table-body");
+  tbody.innerHTML = data.tables
+    .map(
+      (t) => `
+    <tr>
+      <td><code>${escapeHtml(t.name)}</code></td>
+      <td>${fmtNum(t.row_count)}</td>
+      <td>${fmtBytes(t.size_bytes)}</td>
+    </tr>`
+    )
+    .join("");
+}
+
+/** "데이터베이스" 탭의 "Operations 데이터베이스" 섹션과 초기 설정 마법사 3단계가 공용으로
+ * 여는 팝업 - POST /admin/operations-database/local-setup으로 Billing DB와 같은
+ * PostgreSQL 서버에 Operations 전용 데이터베이스를 새로 만든다. */
+function openOperationsLocalDbModal() {
+  document.getElementById("operations-local-db-form").reset();
+  document.getElementById("operations-local-db-form").hidden = false;
+  document.getElementById("operations-local-db-result").hidden = true;
+  document.getElementById("operations-local-db-error").hidden = true;
+  document.getElementById("operations-local-db-modal").hidden = false;
+}
+
+function closeOperationsLocalDbModal() {
+  document.getElementById("operations-local-db-modal").hidden = true;
+  wizardReturnFromSubModal();
+}
+
+async function onOperationsLocalDbFormSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("operations-local-db-error");
+  errEl.hidden = true;
+  const dbName = document.getElementById("operations-local-db-name").value.trim();
+
+  const btn = document.getElementById("operations-local-db-submit-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "생성 중...";
+  try {
+    const payload = { confirm: true };
+    if (dbName) payload.db_name = dbName;
+    const result = await api("/admin/operations-database/local-setup", { method: "POST", body: JSON.stringify(payload) });
+
+    document.getElementById("operations-local-db-message").textContent = result.message;
+    document.getElementById("operations-local-db-steps").innerHTML = result.next_steps
+      .map((step) => `<li>${escapeHtml(step)}</li>`)
+      .join("");
+    document.getElementById("operations-local-db-result").hidden = false;
+    document.getElementById("operations-local-db-form").hidden = true;
+    showToast("Operations DB용 로컬 추가 데이터베이스를 생성했습니다.", "success");
+  } catch (err) {
+    errEl.textContent = err.message || "생성에 실패했습니다.";
+    errEl.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
 function _collectExternalDbForm() {
   return {
     host: document.getElementById("external-db-host").value.trim(),
@@ -1274,9 +1489,14 @@ async function onExternalDbMigrateSubmit(e) {
   const errEl = document.getElementById("external-db-form-error");
   errEl.hidden = true;
 
+  // [v4.9] state.externalDbTarget에 따라 Billing DB(/admin/database/migrate)와
+  // Operations DB(/admin/operations-database/external-setup) 중 어느 쪽을 마이그레이션할지 정한다.
+  const isOps = state.externalDbTarget === "operations";
+  const dataLabel = isOps ? "Operations 데이터(VM 인벤토리/전원상태)" : "현재 데이터";
+
   if (
     !confirm(
-      "대상 PostgreSQL DB로 현재 데이터 전체를 복사합니다. 대상 DB는 반드시 비어 있어야 하며, " +
+      `대상 PostgreSQL DB로 ${dataLabel} 전체를 복사합니다. 대상 DB는 반드시 비어 있어야 하며, ` +
         "이 작업만으로는 앱이 실제로 그 DB를 쓰도록 전환되지 않습니다(안내에 따라 별도로 .env를 " +
         "바꾸고 컨테이너를 재시작해야 합니다). 계속하시겠습니까?"
     )
@@ -1290,7 +1510,8 @@ async function onExternalDbMigrateSubmit(e) {
   btn.textContent = "마이그레이션 중...";
   try {
     const payload = { ..._collectExternalDbForm(), confirm: true };
-    const result = await api("/admin/database/migrate", { method: "POST", body: JSON.stringify(payload) });
+    const endpoint = isOps ? "/admin/operations-database/external-setup" : "/admin/database/migrate";
+    const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
 
     document.getElementById("external-db-migrate-message").textContent = result.message;
     document.getElementById("external-db-migrate-table-body").innerHTML = result.tables

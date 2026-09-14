@@ -5,6 +5,13 @@
   해당 계정이 수집한 vCenter/Datacenter/Cluster/VM Folder/VM Tag 인벤토리를 조회
 - 테넌트 관리: 테넌트 생성/조회/수정/삭제, 테넌트 하위 프로젝트(Cluster/Folder/Tag 다중 선택
   기준) 생성/수정/삭제, 테넌트에 사용자 계정 생성/배정
+
+[v4.9] Billing DB(Tenant/Project/RateCard/User)와 Operations DB(IntegrationAccount~
+VirtualMachine/PowerSample)가 분리되면서, 두 데이터베이스를 함께 참조하는 대부분의
+엔드포인트는 db(Depends(get_db))와 ops_db(Depends(get_ops_db)) 세션을 모두 받는다.
+Project<->Cluster/Folder/Tag 매칭 기준은 더 이상 ORM relationship이 아니라
+app/project_criteria.py(연결 테이블 id 목록)와 app/ops_queries.py(Operations DB 조회)로
+조합한다.
 """
 from __future__ import annotations
 
@@ -23,32 +30,25 @@ from app.billing.aggregator import (
 )
 from app.billing.statement_pdf import build_project_statement_pdf
 from app.collector import recompute_project_assignments, sync_account_once
-from app.database import get_db
+from app.database import get_db, get_ops_db
 from app.db_admin import (
     ExternalDbNotEmptyError,
     LocalDbSetupError,
+    OperationsDbSetupError,
     apply_local_db_setup,
+    apply_operations_local_setup,
     export_database_bytes,
     get_database_overview,
     get_setup_status,
     mark_setup_seen,
     migrate_to_external_postgres,
+    operations_target,
     test_external_connection,
 )
-from app.models import (
-    Cluster,
-    IntegrationAccount,
-    IntegrationKind,
-    Project,
-    RateCard,
-    RateCardHistory,
-    Tag,
-    Tenant,
-    User,
-    UserRole,
-    VirtualMachine,
-    VMFolder,
-)
+from app.models import Project, RateCard, RateCardHistory, Tenant, User, UserRole
+from app.models_ops import Cluster, IntegrationAccount, IntegrationKind, Tag, VMFolder
+from app.ops_queries import unassign_project_vms, unassign_projects_vms
+from app.project_criteria import delete_project_criteria, get_project_criteria_ids, set_project_criteria
 from app.routers.common import parse_month_param, parse_period, project_to_out, project_usage_to_schema
 from app.schemas import (
     AdminOverviewOut,
@@ -67,6 +67,8 @@ from app.schemas import (
     LocalDbSetupRequest,
     LocalDbSetupResult,
     MonthForecastOut,
+    OperationsDbLocalSetupRequest,
+    OperationsDbLocalSetupResult,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -99,17 +101,20 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 @router.get("/system-status", response_model=SystemStatusOut)
-def system_status(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> SystemStatusOut:
-    return get_system_status(db)
+def system_status(
+    _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
+) -> SystemStatusOut:
+    return get_system_status(db, ops_db)
 
 
 # ==========================================================================
-# [v4.6] 데이터베이스 (현재 DB 정보 / 외부 PostgreSQL 연결 테스트·마이그레이션 / 내보내기)
+# [v4.6] 데이터베이스 (현재 Billing DB 정보 / 외부 PostgreSQL 연결 테스트·마이그레이션 / 내보내기)
 # ==========================================================================
 
 
 @router.get("/database", response_model=DatabaseOverviewOut)
 def database_overview(_admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> DatabaseOverviewOut:
+    """현재 Billing DB(Tenant/Project/RateCard/User 등)의 접속 정보/크기/테이블별 통계."""
     return get_database_overview(db)
 
 
@@ -124,6 +129,8 @@ def database_test_connection(
 def database_migrate(
     payload: ExternalDbMigrateRequest, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
 ) -> ExternalDbMigrateResult:
+    """Billing DB 전체를 외부 PostgreSQL로 마이그레이션한다 (Operations DB는 건드리지 않음 -
+    Operations DB를 옮기려면 아래 POST /operations-database/external-setup을 사용하세요)."""
     if not payload.confirm:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 마이그레이션이 실행됩니다")
     try:
@@ -136,6 +143,7 @@ def database_migrate(
 
 @router.get("/database/export")
 def database_export(_admin: User = Depends(require_admin)) -> Response:
+    """Billing DB 전체를 백업 파일로 내려받는다 (Operations DB는 포함되지 않음)."""
     try:
         data, filename, media_type = export_database_bytes()
     except RuntimeError as exc:
@@ -148,9 +156,67 @@ def database_export(_admin: User = Depends(require_admin)) -> Response:
 
 
 # ==========================================================================
+# [v4.9] Operations DB (VM 인벤토리/전원상태 수집 데이터) - "로컬 추가 데이터베이스" /
+# "외부 데이터베이스" 설정 마법사가 호출하는 엔드포인트. Billing DB와 별개의 물리 DB로
+# 분리할 수 있게 하는 것이 목적이며, 아래 세 엔드포인트 자체는 "wizard를 봤는지" 플래그를
+# 건드리지 않는다(프론트엔드가 마법사 전체를 마친 뒤 POST /setup-status/mark-seen을
+# 별도로 호출한다).
+# ==========================================================================
+
+
+@router.get("/operations-database", response_model=DatabaseOverviewOut)
+def operations_database_overview(
+    _admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
+) -> DatabaseOverviewOut:
+    """현재 Operations DB(VirtualMachine/PowerSample/IntegrationAccount 등)의 접속
+    정보/크기/테이블별 통계. GET /database(Billing DB)의 Operations DB 버전."""
+    return get_database_overview(ops_db, target=operations_target())
+
+
+@router.post("/operations-database/local-setup", response_model=OperationsDbLocalSetupResult)
+def operations_database_local_setup(
+    payload: OperationsDbLocalSetupRequest, _admin: User = Depends(require_admin)
+) -> OperationsDbLocalSetupResult:
+    """"로컬 추가 데이터베이스" 선택 - 현재 Billing DB와 같은 PostgreSQL 서버에 Operations
+    전용 데이터베이스를 새로 생성한다 (Billing DB가 SQLite 폴백이면 대신 로컬 파일을 하나
+    더 만든다). 응답의 operations_database_url을 .env의 OPERATIONS_DATABASE_URL에 반영하고
+    재기동해야 실제로 전환된다 (next_steps 참고) - 이 호출 자체는 새 DB를 만들기만 할 뿐,
+    지금 이 프로세스가 쓰는 연결을 바꾸지 않는다.
+    """
+    if not payload.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 실행됩니다")
+    try:
+        return apply_operations_local_setup(payload)
+    except OperationsDbSetupError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - DB 접속/권한 등 다양한 원인을 그대로 안내
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"로컬 추가 데이터베이스 생성 실패: {exc}") from exc
+
+
+@router.post("/operations-database/external-setup", response_model=ExternalDbMigrateResult)
+def operations_database_external_setup(
+    payload: ExternalDbMigrateRequest, _admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
+) -> ExternalDbMigrateResult:
+    """"외부 데이터베이스" 선택 - 현재 Operations DB의 데이터를 관리자가 입력한 외부
+    PostgreSQL로 마이그레이션한다 (POST /database/migrate의 Operations DB 버전, 대상
+    metadata만 다르다). 대상 DB는 반드시 비어 있어야 한다."""
+    if not payload.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 마이그레이션이 실행됩니다")
+    try:
+        return migrate_to_external_postgres(ops_db, payload, target=operations_target())
+    except ExternalDbNotEmptyError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - 접속/네트워크 등 다양한 원인을 그대로 안내
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"마이그레이션 실패: {exc}") from exc
+
+
+# ==========================================================================
 # [v4.8] 최초 로그인 DB 설정 게이트 (로컬 DB 계속 사용 / 외부 DB 연동 안내 + 로컬 DB
 # 계정 비밀번호 변경/전체 초기화) - "데이터베이스" 개편 배경은 app/db_admin.py 상단
-# 주석 및 claude/vcf-billing-portal-design.md "v4.8 개편" 참고.
+# 주석 및 claude/vcf-billing-portal-design.md "v4.8 개편" 참고. [v4.9] 이 세 엔드포인트
+# 자체는 기존 계약 그대로(Billing DB 전용) 유지하고, Operations DB 선택지는 위 새
+# 엔드포인트 세 개가 담당한다 - "wizard를 이미 봤는지" 플래그는 여전히 이 섹션의
+# setup-status 하나로 마법사 전체를 대표한다.
 # ==========================================================================
 
 
@@ -175,7 +241,7 @@ def database_local_setup(
 ) -> LocalDbSetupResult:
     """최초 설정 게이트에서 "로컬 DB 계속 사용"을 고른 뒤 제출하는 폼 - DB 계정 비밀번호
     변경(안전, 기본값)이나 전체 초기화+비밀번호 변경(파괴적, wipe_data=true) 중 관리자가
-    직접 고른 쪽을 실행한다."""
+    직접 고른 쪽을 실행한다. (Billing DB 전용 - Operations DB는 건드리지 않는다.)"""
     if not payload.confirm:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm=true로 명시적으로 확인해야 실행됩니다")
     if payload.wipe_data and not payload.confirm_wipe:
@@ -201,9 +267,10 @@ def list_available_months(
     tenant_id: int | None = Query(None, description="지정 시 해당 테넌트 소속 데이터만 대상으로 함"),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> list[str]:
     """데이터가 존재하는 캘린더 월 목록 (YYYY-MM, 최신순) - 월 선택 드롭다운을 채우는 데 사용."""
-    return available_months(db, tenant_id=tenant_id)
+    return available_months(db, ops_db, tenant_id=tenant_id)
 
 
 @router.get("/overview", response_model=AdminOverviewOut)
@@ -215,9 +282,10 @@ def overview(
     tenant_id: int | None = Query(None, description="지정 시 해당 테넌트만 조회 (교차 확인)"),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> AdminOverviewOut:
     s, e = parse_period(period, start, end, month)
-    results = compute_all_projects_usage(db, s, e, tenant_id=tenant_id)
+    results = compute_all_projects_usage(db, ops_db, s, e, tenant_id=tenant_id)
     project_schemas = [project_usage_to_schema(r, s, e) for r in results]
 
     currencies = {p.currency for p in project_schemas}
@@ -281,7 +349,7 @@ def overview(
 
     total_cost = round(sum(p.total_cost for p in project_schemas), 2)
     previous_period_total_cost, period_over_period_change_pct = period_over_period_change(
-        db, s, e, total_cost, tenant_id=tenant_id
+        db, ops_db, s, e, total_cost, tenant_id=tenant_id
     )
 
     return AdminOverviewOut(
@@ -306,10 +374,11 @@ def month_forecast(
     tenant_id: int | None = Query(None, description="지정 시 해당 테넌트만 대상으로 함"),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> MonthForecastOut:
     """[v4.7] 이번 달(1일~현재) 실적을 바탕으로 한 이번 달 예상 청구액. 화면에서 선택 중인
     조회 기간(period)과 무관하게 항상 현재 캘린더 월 기준으로 계산한다."""
-    result = compute_month_forecast(db, tenant_id=tenant_id)
+    result = compute_month_forecast(db, ops_db, tenant_id=tenant_id)
     return MonthForecastOut(
         month=result.month,
         mtd_total_cost=result.mtd_total_cost,
@@ -329,12 +398,13 @@ def project_usage(
     month: str | None = Query(None, description="period=month 일 때 YYYY-MM 형식"),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> ProjectUsageOut:
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "프로젝트를 찾을 수 없습니다")
     s, e = parse_period(period, start, end, month)
-    result = compute_project_usage(db, project, s, e)
+    result = compute_project_usage(db, ops_db, project, s, e)
     return project_usage_to_schema(result, s, e)
 
 
@@ -344,6 +414,7 @@ def project_statement_pdf(
     month: str = Query(..., description="YYYY-MM 형식 (예: 2026-08)"),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> Response:
     """지정 프로젝트의 특정 캘린더 월 사용량 결산서를 PDF로 내려받는다 (관리자 - 전체 테넌트 대상)."""
     project = db.get(Project, project_id)
@@ -351,7 +422,7 @@ def project_statement_pdf(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "프로젝트를 찾을 수 없습니다")
     year, month_int = parse_month_param(month)
     s, e = calendar_month_period(year, month_int)
-    result = compute_project_usage(db, project, s, e)
+    result = compute_project_usage(db, ops_db, project, s, e)
     pdf_bytes = build_project_statement_pdf(result, year, month_int, s, e, tenant_name=project.tenant.name)
     filename = f"{project.key}_{year}-{month_int:02d}_statement.pdf"
     return Response(
@@ -367,6 +438,7 @@ def update_rates(
     payload: RateCardUpdate,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> ProjectUsageOut:
     """프로젝트별 vCPU/vMEM/vDisk 시간당 단가를 설정한다. 변경 이력은 감사 로그로 남는다."""
     project = db.get(Project, project_id)
@@ -401,17 +473,17 @@ def update_rates(
     db.commit()
 
     s, e = default_period(30)
-    result = compute_project_usage(db, project, s, e)
+    result = compute_project_usage(db, ops_db, project, s, e)
     return project_usage_to_schema(result, s, e)
 
 
 # ==========================================================================
-# 계정 연동 (VCF Operations / Aria Operations) - 독립/전역 엔티티
+# 계정 연동 (VCF Operations / Aria Operations) - 독립/전역 엔티티, Operations DB 소속
 # ==========================================================================
 
 
-def _get_account_or_404(db: Session, account_id: int) -> IntegrationAccount:
-    account = db.get(IntegrationAccount, account_id)
+def _get_account_or_404(ops_db: Session, account_id: int) -> IntegrationAccount:
+    account = ops_db.get(IntegrationAccount, account_id)
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "연동 계정을 찾을 수 없습니다")
     return account
@@ -481,15 +553,15 @@ def _build_inventory_out(account: IntegrationAccount) -> IntegrationInventoryOut
 
 @router.get("/integration-accounts", response_model=list[IntegrationAccountOut])
 def list_integration_accounts(
-    _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    _admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
 ) -> list[IntegrationAccountOut]:
-    accounts = db.query(IntegrationAccount).order_by(IntegrationAccount.name).all()
+    accounts = ops_db.query(IntegrationAccount).order_by(IntegrationAccount.name).all()
     return [_integration_account_to_out(a) for a in accounts]
 
 
 @router.post("/integration-accounts", response_model=IntegrationAccountOut, status_code=status.HTTP_201_CREATED)
 def create_integration_account(
-    payload: IntegrationAccountCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    payload: IntegrationAccountCreate, admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
 ) -> IntegrationAccountOut:
     """VCF Operations/Aria Operations 연동 계정을 독립적으로 등록한다 (특정 테넌트에 종속되지 않음).
 
@@ -501,7 +573,7 @@ def create_integration_account(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'kind는 "vcf_ops"여야 합니다') from exc
 
-    if db.query(IntegrationAccount).filter_by(name=payload.name).one_or_none():
+    if ops_db.query(IntegrationAccount).filter_by(name=payload.name).one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 사용 중인 연동 계정 이름입니다")
 
     account = IntegrationAccount(
@@ -514,15 +586,16 @@ def create_integration_account(
         verify_ssl=payload.verify_ssl,
         updated_by=admin.email,
     )
-    db.add(account)
-    db.commit()
-    db.refresh(account)
+    ops_db.add(account)
+    ops_db.commit()
+    ops_db.refresh(account)
 
     # 등록 즉시 연결을 시도해 인벤토리를 1회 가져온다 - 계정 정보가 맞는지 곧바로 확인할 수
     # 있게 하기 위함. 실패해도 계정 자체는 그대로 생성된 채 남고(상태만 "error"), 관리자가
     # "계정 연동" 화면에서 정보를 고쳐 저장하거나 "가져오기" 버튼으로 재시도할 수 있다.
-    sync_account_once(db, account)
-    db.refresh(account)
+    # sync_account_once()가 내부적으로 Billing DB 세션을 열어 Project 배정 재계산까지 한다.
+    sync_account_once(ops_db, account)
+    ops_db.refresh(account)
     return _integration_account_to_out(account)
 
 
@@ -531,12 +604,12 @@ def update_integration_account(
     account_id: int,
     payload: IntegrationAccountUpdate,
     admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> IntegrationAccountOut:
-    account = _get_account_or_404(db, account_id)
+    account = _get_account_or_404(ops_db, account_id)
 
     if payload.name is not None and payload.name != account.name:
-        if db.query(IntegrationAccount).filter(IntegrationAccount.name == payload.name, IntegrationAccount.id != account.id).one_or_none():
+        if ops_db.query(IntegrationAccount).filter(IntegrationAccount.name == payload.name, IntegrationAccount.id != account.id).one_or_none():
             raise HTTPException(status.HTTP_409_CONFLICT, "이미 사용 중인 연동 계정 이름입니다")
         account.name = payload.name
 
@@ -559,38 +632,48 @@ def update_integration_account(
         account.verify_ssl = payload.verify_ssl
         connection_changed = True
     account.updated_by = admin.email
-    db.commit()
-    db.refresh(account)
+    ops_db.commit()
+    ops_db.refresh(account)
 
     if connection_changed:
-        sync_account_once(db, account)
-        db.refresh(account)
+        sync_account_once(ops_db, account)
+        ops_db.refresh(account)
     return _integration_account_to_out(account)
 
 
 @router.delete("/integration-accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_integration_account(
-    account_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    account_id: int,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> None:
     """연동 계정을 삭제한다. 이 계정이 수집한 인벤토리(vCenter~VM)도 함께 삭제되며, 이 인벤토리를
-    매칭 기준으로 사용하던 Project는 더 이상 해당 VM을 표시하지 않게 된다."""
-    account = _get_account_or_404(db, account_id)
-    db.delete(account)
-    db.commit()
-    recompute_project_assignments(db)
+    매칭 기준으로 사용하던 Project는 더 이상 해당 VM을 표시하지 않게 된다.
+
+    [v4.9] 삭제된 Cluster/VMFolder/Tag의 id가 project_cluster_link 등(Billing DB)에
+    소프트 참조로 남아 있을 수 있으나, 그 id를 참조하는 VM 자체가 더 이상 없으므로
+    recompute_project_assignments()의 매칭 결과에는 영향이 없다 (app/models.py 상단
+    주석 참고) - 링크 테이블의 그 orphan 행 자체를 지우지는 않는다(굳이 지울 필요가
+    없고, 관리자가 나중에 같은 external_id로 계정을 다시 연동하면 새 id로 재매칭됨).
+    """
+    account = _get_account_or_404(ops_db, account_id)
+    ops_db.delete(account)
+    ops_db.commit()
+    recompute_project_assignments(db, ops_db)
 
 
 @router.post("/integration-accounts/{account_id}/sync", response_model=IntegrationSyncOut)
 def sync_integration_account(
-    account_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    account_id: int, _admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
 ) -> IntegrationSyncOut:
     """"가져오기" 버튼 - 5분 주기 자동 수집을 기다리지 않고 즉시 연결을 시도해 최신
     인벤토리(vCenter~VM, vCPU/vMEM/vDisk, Tag)를 가져온다. 연결 실패 시에도 200으로
     응답하며(status="error"), 실패 사유는 계정의 last_sync_error 및 이후 계정 목록
     조회에도 그대로 남아 상태 배지에 표시된다."""
-    account = _get_account_or_404(db, account_id)
-    sync_status, message, new_samples = sync_account_once(db, account)
-    db.refresh(account)
+    account = _get_account_or_404(ops_db, account_id)
+    sync_status, message, new_samples = sync_account_once(ops_db, account)
+    ops_db.refresh(account)
     return IntegrationSyncOut(
         account=_integration_account_to_out(account),
         status=sync_status,
@@ -601,14 +684,14 @@ def sync_integration_account(
 
 @router.get("/integration-accounts/{account_id}/inventory", response_model=IntegrationInventoryOut)
 def get_integration_inventory(
-    account_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    account_id: int, _admin: User = Depends(require_admin), ops_db: Session = Depends(get_ops_db)
 ) -> IntegrationInventoryOut:
     """연동 계정의 vCenter/Datacenter/Cluster/VM Folder/VM Tag 전체 계층을 조회한다.
 
     프로젝트 생성/수정 화면에서 Cluster/VM Folder/VM Tag 다중 선택 체크박스를 채우는 데 쓴다.
     아직 한 번도 수집되지 않은 계정은 빈 인벤토리를 반환한다 (수집기가 5분 주기로 자동 수집).
     """
-    account = _get_account_or_404(db, account_id)
+    account = _get_account_or_404(ops_db, account_id)
     return _build_inventory_out(account)
 
 
@@ -655,15 +738,21 @@ def _get_tenant_project_or_404(db: Session, tenant: Tenant, project_id: int) -> 
     return project
 
 
-def _resolve_criteria_rows(db: Session, model, ids: list[int]) -> list:
-    """Cluster/VMFolder/Tag id 목록을 실제 행으로 변환한다. 존재하지 않는 id가 있으면 400."""
+def _validate_criteria_ids(ops_db: Session, model, ids: list[int]) -> list[int]:
+    """Cluster/VMFolder/Tag id 목록이 Operations DB에 실제로 존재하는지 검증하고
+    중복을 제거해 반환한다. 존재하지 않는 id가 있으면 400.
+
+    [v4.9] 예전에는 실제 ORM 행을 반환해 project.clusters = rows 처럼 relationship에
+    바로 대입했지만, Project<->Cluster/Folder/Tag가 더 이상 relationship이 아니므로
+    id만 검증해서 돌려주고 실제 저장은 app/project_criteria.set_project_criteria()가 한다.
+    """
     if not ids:
         return []
     unique_ids = list(dict.fromkeys(ids))
-    rows = db.query(model).filter(model.id.in_(unique_ids)).all()
-    if len(rows) != len(unique_ids):
+    count = ops_db.query(model).filter(model.id.in_(unique_ids)).count()
+    if count != len(unique_ids):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"존재하지 않는 {model.__name__} id가 포함되어 있습니다")
-    return rows
+    return unique_ids
 
 
 @router.get("/tenants", response_model=list[TenantOut])
@@ -685,12 +774,14 @@ def create_tenant(payload: TenantCreate, _admin: User = Depends(require_admin), 
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantDetailOut)
-def get_tenant(tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> TenantDetailOut:
+def get_tenant(
+    tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
+) -> TenantDetailOut:
     tenant = _get_tenant_or_404(db, tenant_id)
     base = _tenant_to_out(tenant)
     return TenantDetailOut(
         **base.model_dump(),
-        projects=[project_to_out(p) for p in sorted(tenant.projects, key=lambda p: p.name)],
+        projects=[project_to_out(db, ops_db, p) for p in sorted(tenant.projects, key=lambda p: p.name)],
         users=[_user_to_admin_out(u) for u in sorted(tenant.users, key=lambda u: u.email)],
     )
 
@@ -710,15 +801,24 @@ def update_tenant(
 
 
 @router.delete("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
-def delete_tenant(tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+def delete_tenant(
+    tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
+) -> None:
     """테넌트를 삭제한다. 하위 Project/User도 함께 삭제된다 (연동 계정/인벤토리는 삭제되지 않음 -
-    독립 엔티티이므로 다른 테넌트가 계속 사용할 수 있다)."""
+    독립 엔티티이므로 다른 테넌트가 계속 사용할 수 있다).
+
+    [v4.9] 하위 Project가 배정해 뒀던 VM(Operations DB)의 project_id를 먼저 None으로
+    되돌리고, 매칭 기준 연결 테이블(Billing DB)도 프로젝트별로 명시적으로 정리한다 -
+    Project<->Cluster/Folder/Tag가 더 이상 relationship이 아니라서 Tenant.projects의
+    cascade="all, delete-orphan"만으로는 링크 테이블 행까지 자동으로 지워지지 않는다.
+    """
     tenant = _get_tenant_or_404(db, tenant_id)
     project_ids = [p.id for p in tenant.projects]
     if project_ids:
-        db.query(VirtualMachine).filter(VirtualMachine.project_id.in_(project_ids)).update(
-            {"project_id": None}, synchronize_session=False
-        )
+        unassign_projects_vms(ops_db, project_ids)
+        ops_db.commit()
+        for pid in project_ids:
+            delete_project_criteria(db, pid)
     db.delete(tenant)
     db.commit()
 
@@ -730,15 +830,19 @@ def delete_tenant(tenant_id: int, _admin: User = Depends(require_admin), db: Ses
 
 @router.get("/tenants/{tenant_id}/projects", response_model=list[ProjectOut])
 def list_tenant_projects(
-    tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    tenant_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db), ops_db: Session = Depends(get_ops_db)
 ) -> list[ProjectOut]:
     tenant = _get_tenant_or_404(db, tenant_id)
-    return [project_to_out(p) for p in sorted(tenant.projects, key=lambda p: p.name)]
+    return [project_to_out(db, ops_db, p) for p in sorted(tenant.projects, key=lambda p: p.name)]
 
 
 @router.post("/tenants/{tenant_id}/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_tenant_project(
-    tenant_id: int, payload: ProjectCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    tenant_id: int,
+    payload: ProjectCreate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> ProjectOut:
     """테넌트 하위에 Project(과금 단위)를 생성한다.
 
@@ -750,10 +854,10 @@ def create_tenant_project(
     if db.query(Project).filter_by(tenant_id=tenant.id, key=payload.key).one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 사용 중인 프로젝트 key입니다 (테넌트 내)")
 
-    clusters = _resolve_criteria_rows(db, Cluster, payload.cluster_ids)
-    folders = _resolve_criteria_rows(db, VMFolder, payload.folder_ids)
-    tags = _resolve_criteria_rows(db, Tag, payload.tag_ids)
-    if not clusters and not folders and not tags:
+    cluster_ids = _validate_criteria_ids(ops_db, Cluster, payload.cluster_ids)
+    folder_ids = _validate_criteria_ids(ops_db, VMFolder, payload.folder_ids)
+    tag_ids = _validate_criteria_ids(ops_db, Tag, payload.tag_ids)
+    if not cluster_ids and not folder_ids and not tag_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cluster/VM Folder/VM Tag 중 최소 1개는 선택해야 합니다")
 
     project = Project(
@@ -763,18 +867,16 @@ def create_tenant_project(
         description=payload.description,
         owner_email=payload.owner_email,
     )
-    project.clusters = clusters
-    project.folders = folders
-    project.tags = tags
     db.add(project)
     db.flush()
+    set_project_criteria(db, project.id, cluster_ids=cluster_ids, folder_ids=folder_ids, tag_ids=tag_ids)
     db.add(RateCard(project_id=project.id, updated_by=admin.email))
     db.commit()
 
     # 새 프로젝트의 매칭 기준을 즉시 반영 (다음 5분 수집 주기를 기다리지 않고 바로 조회 가능하도록)
-    recompute_project_assignments(db)
+    recompute_project_assignments(db, ops_db)
     db.refresh(project)
-    return project_to_out(project)
+    return project_to_out(db, ops_db, project)
 
 
 @router.put("/tenants/{tenant_id}/projects/{project_id}", response_model=ProjectOut)
@@ -784,6 +886,7 @@ def update_tenant_project(
     payload: ProjectUpdate,
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> ProjectOut:
     """프로젝트의 이름/설명/담당자 및 Cluster/VM Folder/VM Tag 매칭 기준을 수정한다.
 
@@ -798,32 +901,46 @@ def update_tenant_project(
         project.description = payload.description
     if payload.owner_email is not None:
         project.owner_email = payload.owner_email
-    if payload.cluster_ids is not None:
-        project.clusters = _resolve_criteria_rows(db, Cluster, payload.cluster_ids)
-    if payload.folder_ids is not None:
-        project.folders = _resolve_criteria_rows(db, VMFolder, payload.folder_ids)
-    if payload.tag_ids is not None:
-        project.tags = _resolve_criteria_rows(db, Tag, payload.tag_ids)
 
-    if not project.clusters and not project.folders and not project.tags:
+    current = get_project_criteria_ids(db, project.id)
+    new_cluster_ids = _validate_criteria_ids(ops_db, Cluster, payload.cluster_ids) if payload.cluster_ids is not None else current["cluster_ids"]
+    new_folder_ids = _validate_criteria_ids(ops_db, VMFolder, payload.folder_ids) if payload.folder_ids is not None else current["folder_ids"]
+    new_tag_ids = _validate_criteria_ids(ops_db, Tag, payload.tag_ids) if payload.tag_ids is not None else current["tag_ids"]
+    if not new_cluster_ids and not new_folder_ids and not new_tag_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cluster/VM Folder/VM Tag 중 최소 1개는 선택해야 합니다")
 
+    set_project_criteria(
+        db,
+        project.id,
+        cluster_ids=new_cluster_ids if payload.cluster_ids is not None else None,
+        folder_ids=new_folder_ids if payload.folder_ids is not None else None,
+        tag_ids=new_tag_ids if payload.tag_ids is not None else None,
+    )
+
     db.commit()
-    recompute_project_assignments(db)
+    recompute_project_assignments(db, ops_db)
     db.refresh(project)
-    return project_to_out(project)
+    return project_to_out(db, ops_db, project)
 
 
 @router.delete("/tenants/{tenant_id}/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_tenant_project(
-    tenant_id: int, project_id: int, _admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    tenant_id: int,
+    project_id: int,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+    ops_db: Session = Depends(get_ops_db),
 ) -> None:
+    """프로젝트를 삭제한다. 배정되어 있던 VM은 삭제되지 않고 project_id만 None으로 되돌아간다
+    (VM은 프로젝트 없이도 계속 존재할 수 있다는 기존 동작 그대로)."""
     tenant = _get_tenant_or_404(db, tenant_id)
     project = _get_tenant_project_or_404(db, tenant, project_id)
-    db.query(VirtualMachine).filter_by(project_id=project.id).update({"project_id": None})
+    unassign_project_vms(ops_db, project.id)
+    ops_db.commit()
+    delete_project_criteria(db, project.id)
     db.delete(project)
     db.commit()
-    recompute_project_assignments(db)
+    recompute_project_assignments(db, ops_db)
 
 
 # --------------------------------------------------------------------------

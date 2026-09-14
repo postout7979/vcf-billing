@@ -5,11 +5,17 @@
   (app/collector.collect_once_for_account)을 그대로 호출해 MockVCFOpsClient의 인벤토리
   (vCenter 1개, Datacenter 2개, Cluster/VM Folder 각 2개, VM 16대, Tag)를 적재한다 -
   "연동은 독립적으로 한 번만 하고, 그 인벤토리에서 여러 테넌트/프로젝트를 나눠 만든다"는
-  새 아키텍처를 실제 운영 코드 경로 그대로 시연한다.
+  아키텍처를 실제 운영 코드 경로 그대로 시연한다.
 - 이 인벤토리를 Cluster/VM Folder/VM Tag 기준(다중 선택, OR 매칭)으로 나눠 데모 Tenant
   2개 x Project 2개씩(총 4개, 프로젝트마다 서로 다른 기준 조합을 사용)를 생성한다.
 - 최근 N일간 5분 간격 PowerSample 백필 (compute_power_state 로직 재사용 -> 실시간 수집과 정합)
 - 로그인용 User 계정 생성: 관리자 1명(admin/admin1!2@3#) + 테넌트별 데모 담당자 1명씩
+
+[v4.9] Billing DB(Tenant/Project/RateCard/User)와 Operations DB(IntegrationAccount~
+PowerSample)가 분리되면서, 이 스크립트는 두 세션(billing_db/ops_db)을 모두 열어 각자의
+데이터베이스에 맞는 테이블에만 쓴다. project.clusters.append(...) 같은 관계형 대입은 더
+이상 쓸 수 없어(서로 다른 물리 DB일 수 있음) app/project_criteria.set_project_criteria()로
+대체했다.
 
 실행:
     python -m app.seed_data --days 14
@@ -25,25 +31,22 @@ from sqlalchemy.orm import Session
 
 from app.auth import hash_password
 from app.collector import floor_to_bucket, recompute_project_assignments, sync_account_once
-from app.database import Base, SessionLocal, engine
+from app.database import Base, OpsBase, OpsSessionLocal, SessionLocal, engine, ops_engine
 from app.integrations.mock_client import MOCK_VM_DEFS, compute_power_state, compute_usage_pct
-from app.models import (
+from app.models import Project, RateCard, Tenant, User, UserRole
+from app.models_ops import (
     Cluster,
     Datacenter,
     IntegrationAccount,
     IntegrationKind,
     PowerSample,
     PowerState,
-    Project,
-    RateCard,
     Tag,
-    Tenant,
-    User,
-    UserRole,
     VCenter,
     VirtualMachine,
     VMFolder,
 )
+from app.project_criteria import set_project_criteria
 from app.security.crypto import encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -129,8 +132,8 @@ DEMO_LAYOUT = [
 ]
 
 
-def _ensure_mock_integration_account(db: Session) -> IntegrationAccount:
-    account = db.query(IntegrationAccount).filter_by(is_mock=True).one_or_none()
+def _ensure_mock_integration_account(ops_db: Session) -> IntegrationAccount:
+    account = ops_db.query(IntegrationAccount).filter_by(is_mock=True).one_or_none()
     if account is not None:
         return account
     account = IntegrationAccount(
@@ -144,66 +147,76 @@ def _ensure_mock_integration_account(db: Session) -> IntegrationAccount:
         is_mock=True,
         updated_by="seed",
     )
-    db.add(account)
-    db.commit()
-    db.refresh(account)
+    ops_db.add(account)
+    ops_db.commit()
+    ops_db.refresh(account)
     logger.info("데모 연동 계정을 생성했습니다: %s (id=%s)", account.name, account.id)
     return account
 
 
-def _collect_mock_inventory(db: Session, account: IntegrationAccount, at: dt.datetime) -> None:
+def _collect_mock_inventory(ops_db: Session, account: IntegrationAccount, at: dt.datetime) -> None:
     """실제 수집 경로(sync_account_once -> collect_once_for_account)를 그대로 사용해 데모
     인벤토리+VM+현재 시점 PowerSample 1건을 적재한다. 과거분은 backfill_power_samples()가
     별도로 채운다. sync_account_once를 쓰므로 데모 계정도 실제 연동 계정과 똑같이
-    last_sync_status="success" 등 연동 상태가 채워진 채로 시작한다."""
-    status, message, _new_samples = sync_account_once(db, account, at=at, interval_minutes=5)
+    last_sync_status="success" 등 연동 상태가 채워진 채로 시작한다.
+
+    sync_account_once()는 기본적으로 Project 배정 재계산까지 시도하지만(내부적으로
+    Billing DB 세션을 새로 연다), 이 시점에는 아직 데모 Tenant/Project가 만들어지기
+    전이라 의미가 없으므로 recompute=False로 건너뛴다 (_ensure_tenants_and_projects
+    이후 seed()가 명시적으로 한 번 더 재계산한다).
+    """
+    status, message, _new_samples = sync_account_once(ops_db, account, at=at, interval_minutes=5, recompute=False)
     if status != "success":
         raise RuntimeError(f"데모 계정 초기 수집 실패: {message}")
 
 
-def _resolve_clusters(db: Session, account: IntegrationAccount, external_ids: list[str]) -> list[Cluster]:
+def _resolve_cluster_ids(ops_db: Session, account: IntegrationAccount, external_ids: list[str]) -> list[int]:
     if not external_ids:
         return []
-    return (
-        db.query(Cluster)
+    rows = (
+        ops_db.query(Cluster)
         .join(Datacenter, Datacenter.id == Cluster.datacenter_id)
         .join(VCenter, VCenter.id == Datacenter.vcenter_id)
         .filter(VCenter.integration_account_id == account.id, Cluster.external_id.in_(external_ids))
         .all()
     )
+    return [c.id for c in rows]
 
 
-def _resolve_folders(db: Session, account: IntegrationAccount, external_ids: list[str]) -> list[VMFolder]:
+def _resolve_folder_ids(ops_db: Session, account: IntegrationAccount, external_ids: list[str]) -> list[int]:
     if not external_ids:
         return []
-    return (
-        db.query(VMFolder)
+    rows = (
+        ops_db.query(VMFolder)
         .join(Datacenter, Datacenter.id == VMFolder.datacenter_id)
         .join(VCenter, VCenter.id == Datacenter.vcenter_id)
         .filter(VCenter.integration_account_id == account.id, VMFolder.external_id.in_(external_ids))
         .all()
     )
+    return [f.id for f in rows]
 
 
-def _resolve_tags(db: Session, account: IntegrationAccount, pairs: list[tuple[str, str]]) -> list[Tag]:
+def _resolve_tag_ids(ops_db: Session, account: IntegrationAccount, pairs: list[tuple[str, str]]) -> list[int]:
     return [
-        db.query(Tag).filter_by(integration_account_id=account.id, category=category, name=name).one()
+        ops_db.query(Tag).filter_by(integration_account_id=account.id, category=category, name=name).one().id
         for category, name in pairs
     ]
 
 
-def _ensure_tenants_and_projects(db: Session, account: IntegrationAccount) -> dict[str, Tenant]:
+def _ensure_tenants_and_projects(
+    billing_db: Session, ops_db: Session, account: IntegrationAccount
+) -> dict[str, Tenant]:
     tenants: dict[str, Tenant] = {}
     for tdef in DEMO_LAYOUT:
-        tenant = db.query(Tenant).filter_by(key=tdef["key"]).one_or_none()
+        tenant = billing_db.query(Tenant).filter_by(key=tdef["key"]).one_or_none()
         if tenant is None:
             tenant = Tenant(key=tdef["key"], name=tdef["name"], description=tdef["description"])
-            db.add(tenant)
-            db.flush()
+            billing_db.add(tenant)
+            billing_db.flush()
         tenants[tenant.key] = tenant
 
         for pdef in tdef["projects"]:
-            project = db.query(Project).filter_by(tenant_id=tenant.id, key=pdef["key"]).one_or_none()
+            project = billing_db.query(Project).filter_by(tenant_id=tenant.id, key=pdef["key"]).one_or_none()
             if project is None:
                 project = Project(
                     tenant_id=tenant.id,
@@ -212,17 +225,18 @@ def _ensure_tenants_and_projects(db: Session, account: IntegrationAccount) -> di
                     description=pdef["description"],
                     owner_email=pdef["owner_email"],
                 )
-                db.add(project)
-                db.flush()
+                billing_db.add(project)
+                billing_db.flush()
 
-            project.clusters = _resolve_clusters(db, account, pdef["cluster_external_ids"])
-            project.folders = _resolve_folders(db, account, pdef["folder_external_ids"])
-            project.tags = _resolve_tags(db, account, pdef["tags"])
+            cluster_ids = _resolve_cluster_ids(ops_db, account, pdef["cluster_external_ids"])
+            folder_ids = _resolve_folder_ids(ops_db, account, pdef["folder_external_ids"])
+            tag_ids = _resolve_tag_ids(ops_db, account, pdef["tags"])
+            set_project_criteria(billing_db, project.id, cluster_ids=cluster_ids, folder_ids=folder_ids, tag_ids=tag_ids)
 
-            rate = db.query(RateCard).filter_by(project_id=project.id).one_or_none()
+            rate = billing_db.query(RateCard).filter_by(project_id=project.id).one_or_none()
             if rate is None:
                 r = pdef["rate"]
-                db.add(
+                billing_db.add(
                     RateCard(
                         project_id=project.id,
                         vcpu_rate_per_hour=r["vcpu"],
@@ -234,14 +248,14 @@ def _ensure_tenants_and_projects(db: Session, account: IntegrationAccount) -> di
                         updated_by="seed",
                     )
                 )
-    db.commit()
+    billing_db.commit()
     return tenants
 
 
-def _ensure_users(db: Session, tenants: dict[str, Tenant]) -> None:
-    admin = db.query(User).filter_by(email=DEFAULT_ADMIN_EMAIL).one_or_none()
+def _ensure_users(billing_db: Session, tenants: dict[str, Tenant]) -> None:
+    admin = billing_db.query(User).filter_by(email=DEFAULT_ADMIN_EMAIL).one_or_none()
     if admin is None:
-        db.add(
+        billing_db.add(
             User(
                 email=DEFAULT_ADMIN_EMAIL,
                 password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
@@ -254,9 +268,9 @@ def _ensure_users(db: Session, tenants: dict[str, Tenant]) -> None:
     for tdef in DEMO_LAYOUT:
         tenant = tenants[tdef["key"]]
         demo_email = f"{tenant.key}-lead@corp.com"
-        user = db.query(User).filter_by(email=demo_email).one_or_none()
+        user = billing_db.query(User).filter_by(email=demo_email).one_or_none()
         if user is None:
-            db.add(
+            billing_db.add(
                 User(
                     email=demo_email,
                     password_hash=hash_password(DEMO_USER_PASSWORD),
@@ -268,11 +282,11 @@ def _ensure_users(db: Session, tenants: dict[str, Tenant]) -> None:
         else:
             user.tenant_id = tenant.id
             user.role = UserRole.USER
-    db.commit()
+    billing_db.commit()
 
 
 def backfill_power_samples(
-    db: Session, account: IntegrationAccount, days: int, now: dt.datetime, interval_minutes: int = 5
+    ops_db: Session, account: IntegrationAccount, days: int, now: dt.datetime, interval_minutes: int = 5
 ) -> int:
     """최근 N일간 VM 전원상태 샘플을 결정론적 프로필 기반으로 소급 적재한다.
 
@@ -284,7 +298,7 @@ def backfill_power_samples(
     start = end - dt.timedelta(days=days)
 
     profile_by_external_id = {v.external_id: v.profile for v in MOCK_VM_DEFS}
-    vms = db.query(VirtualMachine).filter_by(integration_account_id=account.id).all()
+    vms = ops_db.query(VirtualMachine).filter_by(integration_account_id=account.id).all()
 
     total_inserted = 0
     for vm in vms:
@@ -293,7 +307,7 @@ def backfill_power_samples(
             continue
 
         latest = (
-            db.query(PowerSample.sampled_at)
+            ops_db.query(PowerSample.sampled_at)
             .filter_by(vm_id=vm.id)
             .filter(PowerSample.sampled_at < end)
             .order_by(PowerSample.sampled_at.desc())
@@ -326,10 +340,10 @@ def backfill_power_samples(
             t += dt.timedelta(minutes=interval_minutes)
 
         if batch:
-            db.bulk_save_objects(batch)
+            ops_db.bulk_save_objects(batch)
             total_inserted += len(batch)
 
-    db.commit()
+    ops_db.commit()
     return total_inserted
 
 
@@ -339,19 +353,22 @@ def seed(days: int = 14, reset: bool = False) -> None:
     if reset:
         logger.warning("기존 데이터를 모두 삭제하고 새로 생성합니다 (--reset)")
         Base.metadata.drop_all(bind=engine)
+        OpsBase.metadata.drop_all(bind=ops_engine)
 
     Base.metadata.create_all(bind=engine)
+    OpsBase.metadata.create_all(bind=ops_engine)
 
-    db = SessionLocal()
+    billing_db = SessionLocal()
+    ops_db = OpsSessionLocal()
     try:
         now = dt.datetime.now(dt.timezone.utc)
-        account = _ensure_mock_integration_account(db)
-        _collect_mock_inventory(db, account, now)
-        tenants = _ensure_tenants_and_projects(db, account)
-        recompute_project_assignments(db)
-        _ensure_users(db, tenants)
-        n = backfill_power_samples(db, account, days=days, now=now)
-        vm_count = db.query(VirtualMachine).filter_by(integration_account_id=account.id).count()
+        account = _ensure_mock_integration_account(ops_db)
+        _collect_mock_inventory(ops_db, account, now)
+        tenants = _ensure_tenants_and_projects(billing_db, ops_db, account)
+        recompute_project_assignments(billing_db, ops_db)
+        _ensure_users(billing_db, tenants)
+        n = backfill_power_samples(ops_db, account, days=days, now=now)
+        vm_count = ops_db.query(VirtualMachine).filter_by(integration_account_id=account.id).count()
         logger.info(
             "시딩 완료: 연동 계정 1개, 테넌트 %d개, VM %d대, PowerSample %d건 신규 백필 (최근 %d일). "
             "관리자 로그인: %s / %s",
@@ -363,7 +380,8 @@ def seed(days: int = 14, reset: bool = False) -> None:
             DEFAULT_ADMIN_PASSWORD,
         )
     finally:
-        db.close()
+        billing_db.close()
+        ops_db.close()
 
 
 if __name__ == "__main__":

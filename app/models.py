@@ -1,25 +1,30 @@
 """
-데이터 모델 (v3: 독립 연동계정 + 인벤토리 계층 + 다중 기준 프로젝트).
+Billing DB 데이터 모델 (v4.9: Billing DB / Operations DB 논리 분리).
 
-- IntegrationAccount : VCF Operations/Aria Operations 연동 계정. 더 이상 Tenant에 종속되지
-                       않는 독립적인 전역 엔티티다 ("계정 연동" 메뉴에서 별도로 관리). 하나의
-                       연동 계정에서 수집한 인벤토리(vCenter~VM)를 여러 Tenant/Project가
-                       나눠서 사용할 수 있다.
-- VCenter/Datacenter/Cluster/VMFolder
-                     : 연동 계정에서 수집한 인벤토리 계층 구조 (vCenter -> Datacenter ->
-                       Cluster/VMFolder). 상호 연결 관계를 그대로 정규화해서 저장한다.
-- Tag               : VM에 부여된 태그 (category+name). 연동 계정 범위에서 유일하다.
-- VirtualMachine    : 연동 계정에서 수집한 VM 인벤토리. 소속 vCenter/Datacenter/Cluster/
-                       Folder 및 태그를 모두 보관한다. project_id는 Project의 매칭 기준에
-                       따라 수집기가 매 주기 재계산하는 값이다.
-- Project           : 과금 단위. Cluster/VM Folder/VM Tag 중 여러 종류를 동시에, 각각 여러
-                       값을 다중 선택해서 매칭 기준으로 삼는다(OR 매칭). Tenant 하위에 속한다.
-- Tenant            : 최상위 조직 단위. 하위 Project와 User를 소유한다. 특정 연동 계정에
-                       종속되지 않으며, Project가 어떤 연동 계정의 인벤토리를 참조하든 상관없다.
-- RateCard/History  : 프로젝트별 단가 및 변경 이력.
-- PowerSample       : 수집 주기(기본 5분)마다 적재하는 VM 전원상태 + 스펙 스냅샷 (과금 원천).
-- User              : 사용자 계정. role=admin 은 전체 Tenant 교차 조회, role=user 는 배정된
-                       tenant_id 하나만 조회 가능. bcrypt 해시 비밀번호 사용.
+[v4.9] 이 파일은 Billing DB(과금 단위 구성)에 속하는 모델만 담는다. VM 인벤토리 수집
+데이터(IntegrationAccount/VCenter/Datacenter/Cluster/VMFolder/Tag/VirtualMachine/
+PowerSample)는 app/models_ops.py로 옮겨 별도 SQLAlchemy DeclarativeBase(OpsBase)를
+사용한다 - 두 데이터베이스는 서로 다른 물리 DB일 수 있어(app/database.py 참고) 더 이상
+하나의 Base.metadata에 같이 둘 수 없고, 그 사이에 SQLAlchemy relationship()이나 SQL
+JOIN도 존재할 수 없다.
+
+- Tenant             : 최상위 조직 단위. 하위 Project와 User를 소유한다.
+- Project            : 과금 단위. Cluster/VM Folder/VM Tag 중 여러 종류를 동시에, 각각
+                       여러 값을 다중 선택해서 매칭 기준으로 삼는다(OR 매칭). 실제
+                       기준 id는 project_cluster_link/project_folder_link/
+                       project_tag_link(아래)에 저장하며, Cluster/VMFolder/Tag 자체는
+                       Operations DB에 있으므로 이 파일에서는 실제 행이 아니라 "id
+                       목록"만 다룬다 (app/project_criteria.py 참고).
+- RateCard/History   : 프로젝트별 단가 및 변경 이력.
+- User               : 사용자 계정. role=admin 은 전체 Tenant 교차 조회, role=user 는
+                       배정된 tenant_id 하나만 조회 가능. bcrypt 해시 비밀번호 사용.
+- AppState           : 앱 전체 런타임 상태 싱글턴(최초 설정 게이트 등).
+
+VirtualMachine.project_id, Project<->Cluster/Folder/Tag 매칭 기준의 cluster_id/
+folder_id/tag_id는 모두 "다른 물리 DB의 행을 가리키는 정수 id"로, ForeignKey 제약을 걸지
+않는다 - PostgreSQL은 물리적으로 분리된 두 데이터베이스 사이의 참조 무결성을 강제할 방법이
+없다(cross-database FK 자체가 존재하지 않음). 정합성은 애플리케이션 코드(프로젝트/연동
+계정 삭제 시 관련 행을 정리하는 라우터 로직, app/collector.py의 재계산)가 책임진다.
 """
 from __future__ import annotations
 
@@ -47,191 +52,43 @@ def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
-class PowerState(str, enum.Enum):
-    ON = "on"
-    OFF = "off"
-
-
 class UserRole(str, enum.Enum):
     ADMIN = "admin"
     USER = "user"
 
 
-class IntegrationKind(str, enum.Enum):
-    """연동 제품 종류.
-
-    [v4.2] Aria Operations는 선택지에서 제거했다(관리자 화면 요청) - VCF Operations
-    하나만 지원한다. 기존에 kind="aria_ops"로 저장된 행이 있는 상태에서 업그레이드하면
-    SQLAlchemy Enum이 그 값을 더 이상 유효한 멤버로 인식하지 못해 해당 계정을 읽을 때
-    오류가 난다 - 업그레이드 전에 그런 계정이 있다면 DB에서 직접
-    `UPDATE integration_accounts SET kind='vcf_ops' WHERE kind='aria_ops'`로 정리하세요
-    (API 형태 자체는 두 제품이 동일해 실제 동작에는 차이가 없다).
-    """
-
-    VCF_OPS = "vcf_ops"
-
-
 # ---------------------------------------------------------------------------
-# 다대다 연결 테이블 (Project의 다중 선택 매칭 기준, VM의 다중 태그)
+# Project의 다중 선택 매칭 기준 연결 테이블
+#
+# [v4.9] project_id는 Billing DB 안의 projects.id를 가리키는 실제 FK다(같은 물리 DB).
+# 하지만 cluster_id/folder_id/tag_id는 Operations DB(app/models_ops.py)의
+# clusters.id/vm_folders.id/tags.id를 가리키는 "소프트 참조"일 뿐이다 - 두 데이터베이스가
+# 물리적으로 분리될 수 있어(app/database.py) ForeignKey()로 선언할 수 없다. 존재하지
+# 않는 id를 참조하게 되는 경우(예: Operations DB 쪽에서 Cluster가 먼저 삭제됨)는
+# app/collector.py의 recompute_project_assignments()가 매칭 후보에서 자연스럽게
+# 제외하는 것으로 흡수한다 (조회 시 실패하지 않음).
 # ---------------------------------------------------------------------------
 
 project_cluster_link = Table(
     "project_cluster_link",
     Base.metadata,
     Column("project_id", ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True),
-    Column("cluster_id", ForeignKey("clusters.id", ondelete="CASCADE"), primary_key=True),
+    Column("cluster_id", Integer, primary_key=True),  # Operations DB clusters.id (소프트 참조, FK 없음)
 )
 
 project_folder_link = Table(
     "project_folder_link",
     Base.metadata,
     Column("project_id", ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True),
-    Column("folder_id", ForeignKey("vm_folders.id", ondelete="CASCADE"), primary_key=True),
+    Column("folder_id", Integer, primary_key=True),  # Operations DB vm_folders.id (소프트 참조, FK 없음)
 )
 
 project_tag_link = Table(
     "project_tag_link",
     Base.metadata,
     Column("project_id", ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True),
-    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", Integer, primary_key=True),  # Operations DB tags.id (소프트 참조, FK 없음)
 )
-
-vm_tag_link = Table(
-    "vm_tag_link",
-    Base.metadata,
-    Column("vm_id", ForeignKey("virtual_machines.id", ondelete="CASCADE"), primary_key=True),
-    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
-)
-
-
-class IntegrationAccount(Base):
-    """
-    VCF Operations/Aria Operations 연동 계정 (독립/전역).
-
-    password_encrypted 는 평문이 아니라 app/security/crypto.py 의 encrypt_secret() 으로
-    암호화된 값이며, 실제 연동 호출 직전에만 decrypt_secret() 으로 복호화해서 사용한다.
-    API 응답에는 절대 포함하지 않는다 (schemas.IntegrationAccountOut 참고).
-
-    is_mock 은 데모/시딩 전용 내부 플래그로, 관리자 API로는 설정할 수 없다(seed_data.py가
-    직접 ORM으로 생성). True면 실제 HTTP 호출 없이 샘플 인벤토리를 생성한다.
-    """
-
-    __tablename__ = "integration_accounts"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-
-    kind: Mapped[IntegrationKind] = mapped_column(Enum(IntegrationKind), default=IntegrationKind.VCF_OPS)
-    name: Mapped[str] = mapped_column(String(128), default="")
-    base_url: Mapped[str] = mapped_column(String(256))
-    username: Mapped[str] = mapped_column(String(256))
-    password_encrypted: Mapped[str] = mapped_column(String(1024))
-    auth_source: Mapped[str] = mapped_column(String(64), default="local")
-    verify_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_mock: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # 연동 상태 - "가져오기"(수동 즉시 수집) 및 5분 주기 자동 수집이 끝날 때마다 갱신된다.
-    # last_sync_status: "never"(한 번도 시도 안 함) | "success" | "error"
-    last_sync_status: Mapped[str] = mapped_column(String(32), default="never")
-    last_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
-    last_sync_error: Mapped[str | None] = mapped_column(String(2048), nullable=True, default=None)
-    last_sync_vm_count: Mapped[int] = mapped_column(Integer, default=0)
-
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    updated_by: Mapped[str] = mapped_column(String(256), default="system")
-
-    vcenters: Mapped[list["VCenter"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")
-    tags: Mapped[list["Tag"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")
-    vms: Mapped[list["VirtualMachine"]] = relationship(back_populates="integration_account", cascade="all, delete-orphan")
-
-
-class VCenter(Base):
-    """연동 계정에서 발견한 vCenter 인스턴스."""
-
-    __tablename__ = "vcenters"
-    __table_args__ = (UniqueConstraint("integration_account_id", "external_id", name="uq_vcenter_account_external_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    integration_account_id: Mapped[int] = mapped_column(ForeignKey("integration_accounts.id"), index=True)
-    external_id: Mapped[str] = mapped_column(String(128), index=True)
-    name: Mapped[str] = mapped_column(String(256))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    integration_account: Mapped["IntegrationAccount"] = relationship(back_populates="vcenters")
-    datacenters: Mapped[list["Datacenter"]] = relationship(back_populates="vcenter", cascade="all, delete-orphan")
-
-
-class Datacenter(Base):
-    """vCenter 하위 Datacenter."""
-
-    __tablename__ = "datacenters"
-    __table_args__ = (UniqueConstraint("vcenter_id", "external_id", name="uq_datacenter_vcenter_external_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    vcenter_id: Mapped[int] = mapped_column(ForeignKey("vcenters.id"), index=True)
-    external_id: Mapped[str] = mapped_column(String(128), index=True)
-    name: Mapped[str] = mapped_column(String(256))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    vcenter: Mapped["VCenter"] = relationship(back_populates="datacenters")
-    clusters: Mapped[list["Cluster"]] = relationship(back_populates="datacenter", cascade="all, delete-orphan")
-    folders: Mapped[list["VMFolder"]] = relationship(back_populates="datacenter", cascade="all, delete-orphan")
-
-
-class Cluster(Base):
-    """Datacenter 하위 vSphere Cluster. Project의 다중 선택 매칭 기준 중 하나."""
-
-    __tablename__ = "clusters"
-    __table_args__ = (UniqueConstraint("datacenter_id", "external_id", name="uq_cluster_dc_external_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    datacenter_id: Mapped[int] = mapped_column(ForeignKey("datacenters.id"), index=True)
-    external_id: Mapped[str] = mapped_column(String(128), index=True)
-    name: Mapped[str] = mapped_column(String(256))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    datacenter: Mapped["Datacenter"] = relationship(back_populates="clusters")
-    vms: Mapped[list["VirtualMachine"]] = relationship(back_populates="cluster")
-    projects: Mapped[list["Project"]] = relationship(secondary=project_cluster_link, back_populates="clusters")
-
-
-class VMFolder(Base):
-    """Datacenter 하위 VM Folder. Project의 다중 선택 매칭 기준 중 하나."""
-
-    __tablename__ = "vm_folders"
-    __table_args__ = (UniqueConstraint("datacenter_id", "external_id", name="uq_folder_dc_external_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    datacenter_id: Mapped[int] = mapped_column(ForeignKey("datacenters.id"), index=True)
-    external_id: Mapped[str] = mapped_column(String(128), index=True)
-    path: Mapped[str] = mapped_column(String(512))  # 예: "/Nova-DC/vm/Prod"
-    name: Mapped[str] = mapped_column(String(256))  # 경로의 마지막 구성요소
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    datacenter: Mapped["Datacenter"] = relationship(back_populates="folders")
-    vms: Mapped[list["VirtualMachine"]] = relationship(back_populates="folder")
-    projects: Mapped[list["Project"]] = relationship(secondary=project_folder_link, back_populates="folders")
-
-
-class Tag(Base):
-    """VM에 부여된 태그 (category+name). Project의 다중 선택 매칭 기준 중 하나."""
-
-    __tablename__ = "tags"
-    __table_args__ = (UniqueConstraint("integration_account_id", "category", "name", name="uq_tag_account_cat_name"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    integration_account_id: Mapped[int] = mapped_column(ForeignKey("integration_accounts.id"), index=True)
-    category: Mapped[str] = mapped_column(String(128))
-    name: Mapped[str] = mapped_column(String(128))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    integration_account: Mapped["IntegrationAccount"] = relationship(back_populates="tags")
-    vms: Mapped[list["VirtualMachine"]] = relationship(secondary=vm_tag_link, back_populates="tags")
-    projects: Mapped[list["Project"]] = relationship(secondary=project_tag_link, back_populates="tags")
-
-    @property
-    def label(self) -> str:
-        return f"{self.category}:{self.name}"
 
 
 class Tenant(Base):
@@ -256,6 +113,11 @@ class Project(Base):
 
     같은 Cluster/Folder/Tag를 두 프로젝트가 동시에 선택한 경우, 수집기는 먼저 생성된(=id가
     작은) 프로젝트를 우선 매칭한다 (app/collector.py의 recompute_project_assignments 참고).
+
+    [v4.9] Cluster/VMFolder/Tag는 이제 Operations DB에 있으므로, 이 클래스는 더 이상
+    `.clusters`/`.folders`/`.tags`/`.vms` relationship을 갖지 않는다. 매칭 기준 id 목록은
+    app/project_criteria.py의 get_project_criteria_ids()로, 배정된 VM은
+    app/ops_queries.py의 get_vms_for_project()로 조회한다.
     """
 
     __tablename__ = "projects"
@@ -273,23 +135,6 @@ class Project(Base):
     rate_card: Mapped["RateCard"] = relationship(
         back_populates="project", uselist=False, cascade="all, delete-orphan"
     )
-    vms: Mapped[list["VirtualMachine"]] = relationship(back_populates="project")
-
-    clusters: Mapped[list["Cluster"]] = relationship(secondary=project_cluster_link, back_populates="projects")
-    folders: Mapped[list["VMFolder"]] = relationship(secondary=project_folder_link, back_populates="projects")
-    tags: Mapped[list["Tag"]] = relationship(secondary=project_tag_link, back_populates="projects")
-
-    @property
-    def criteria_summary(self) -> str:
-        """관리자 화면/결산서에 표시할 매칭 기준 요약 (예: "Cluster 2개 · Tag 1개")."""
-        parts = []
-        if self.clusters:
-            parts.append(f"Cluster {len(self.clusters)}개")
-        if self.folders:
-            parts.append(f"Folder {len(self.folders)}개")
-        if self.tags:
-            parts.append(f"Tag {len(self.tags)}개")
-        return " · ".join(parts) if parts else "미지정"
 
 
 class RateCard(Base):
@@ -339,75 +184,6 @@ class RateCardHistory(Base):
     usage_weight_floor_pct: Mapped[int] = mapped_column(Integer, default=30)
     changed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     changed_by: Mapped[str] = mapped_column(String(256), default="system")
-
-
-class VirtualMachine(Base):
-    __tablename__ = "virtual_machines"
-    __table_args__ = (UniqueConstraint("integration_account_id", "external_id", name="uq_vm_account_external_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    integration_account_id: Mapped[int] = mapped_column(ForeignKey("integration_accounts.id"), index=True)
-    # VCF Operations / vCenter 상의 고유 식별자 (moref). 연동 계정 범위 내에서만 유일하면 된다.
-    external_id: Mapped[str] = mapped_column(String(128), index=True)
-    name: Mapped[str] = mapped_column(String(256))
-
-    vcenter_id: Mapped[int | None] = mapped_column(ForeignKey("vcenters.id"), nullable=True, index=True)
-    datacenter_id: Mapped[int | None] = mapped_column(ForeignKey("datacenters.id"), nullable=True, index=True)
-    cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"), nullable=True, index=True)
-    folder_id: Mapped[int | None] = mapped_column(ForeignKey("vm_folders.id"), nullable=True, index=True)
-
-    # Project의 Cluster/Folder/Tag 다중 선택 기준에 따라 수집기가 매 주기 재계산하는 값.
-    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
-
-    # 현재 스펙 (VM 인벤토리 상 최신 값)
-    vcpu_count: Mapped[int] = mapped_column(Integer, default=0)
-    vmem_gb: Mapped[float] = mapped_column(Float, default=0.0)
-    vdisk_gb: Mapped[float] = mapped_column(Float, default=0.0)
-    os_name: Mapped[str] = mapped_column(String(128), default="")
-    current_power_state: Mapped[PowerState] = mapped_column(Enum(PowerState), default=PowerState.OFF)
-
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    integration_account: Mapped["IntegrationAccount"] = relationship(back_populates="vms")
-    vcenter: Mapped["VCenter | None"] = relationship()
-    datacenter: Mapped["Datacenter | None"] = relationship()
-    cluster: Mapped["Cluster | None"] = relationship(back_populates="vms")
-    folder: Mapped["VMFolder | None"] = relationship(back_populates="vms")
-    project: Mapped["Project | None"] = relationship(back_populates="vms")
-    tags: Mapped[list["Tag"]] = relationship(secondary=vm_tag_link, back_populates="vms")
-    samples: Mapped[list["PowerSample"]] = relationship(back_populates="vm", cascade="all, delete-orphan")
-
-
-class PowerSample(Base):
-    """
-    수집 주기(기본 5분)마다 적재하는 샘플. 과금 계산의 원천 데이터.
-
-    한 행 = 해당 수집 블록 동안 VM이 관측된 전원상태 및 스펙.
-    power_state == ON 인 행 개수 * 수집 간격(분) 이 곧 과금 대상 Power-On 시간이 된다.
-    """
-
-    __tablename__ = "power_samples"
-    __table_args__ = (UniqueConstraint("vm_id", "sampled_at", name="uq_vm_sample_time"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    vm_id: Mapped[int] = mapped_column(ForeignKey("virtual_machines.id"), index=True)
-    sampled_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
-    power_state: Mapped[PowerState] = mapped_column(Enum(PowerState))
-
-    # 샘플 시점의 스펙 스냅샷 (향후 VM 스펙 변경 이력을 정확히 반영하기 위함)
-    vcpu_count: Mapped[int] = mapped_column(Integer, default=0)
-    vmem_gb: Mapped[float] = mapped_column(Float, default=0.0)
-    vdisk_gb: Mapped[float] = mapped_column(Float, default=0.0)
-
-    # [v3.7] 이 블록 시점의 실사용률(%, 0~100) - VCF Operations의 cpu|usage_average/
-    # mem|usage_average에 해당. 수집 실패/미지원 환경/Mock에서 아직 계산 안 된 경우 등
-    # 값을 못 구하면 None으로 남기며, 과금 엔진은 None을 "가중치 없음(=기존과 동일하게
-    # 100% 과금)"으로 처리한다(app/billing/engine.py 참고) - 이 컬럼이 비어 있다고
-    # 과금이 실패하거나 0원이 되지 않는다.
-    cpu_usage_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
-    mem_usage_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    vm: Mapped["VirtualMachine"] = relationship(back_populates="samples")
 
 
 class User(Base):

@@ -39,13 +39,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import SessionLocal  # noqa: E402
+from app.database import OpsSessionLocal  # noqa: E402
 from app.integrations.vcf_ops_client import (  # noqa: E402
     IntegrationConnectionInfo,
     VCFOpsRestClient,
     _normalize_property_name,
 )
-from app.models import IntegrationAccount  # noqa: E402
+from app.models_ops import IntegrationAccount  # noqa: E402  ([v4.9] Operations DB 소속)
 from app.security.crypto import decrypt_secret  # noqa: E402
 
 # [v3.5] VM 프로퍼티 중 계층(Parent Cluster/Datacenter/Folder/Host/vCenter)/태그 관련
@@ -61,7 +61,7 @@ def _print_json(label: str, obj) -> None:
 
 
 def list_accounts() -> None:
-    db = SessionLocal()
+    db = OpsSessionLocal()
     try:
         accounts = db.query(IntegrationAccount).order_by(IntegrationAccount.id).all()
         if not accounts:
@@ -75,7 +75,7 @@ def list_accounts() -> None:
 
 
 def inspect(account_id: int, max_vms: int) -> None:
-    db = SessionLocal()
+    db = OpsSessionLocal()
     try:
         account = db.get(IntegrationAccount, account_id)
         if account is None:

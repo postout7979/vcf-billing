@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     # "database is locked" 발생 가능 - README "아키텍처" 참고).
     database_url: str = f"sqlite:///{BASE_DIR}/data/billing.db"
 
+    # [v4.9] Operations DB(VM 인벤토리/전원상태 등 "Operation 자료 수집" 전용 논리
+    # 데이터베이스)를 가리키는 별도 접속 문자열. 비워두면(기본값, None) Billing DB와
+    # 같은 물리 데이터베이스를 그대로 사용한다 - 기존 단일 DB 배포와 완전히 하위
+    # 호환된다. 값을 채우면 같은 PostgreSQL 서버의 별도 DB("로컬 추가 데이터베이스"
+    # 마법사 선택지) 또는 완전히 다른 서버("외부 데이터베이스" 선택지)를 가리킬 수
+    # 있다. 코드 경로는 항상 별도 엔진(app/database.py의 ops_engine/OpsSessionLocal)을
+    # 통하며, 이 값이 database_url과 같은 경우에도 "우연히 같은 곳을 가리키는 두 개의
+    # 논리적으로 분리된 엔진"으로 취급한다 (billing 세션과 ops 세션을 절대 공유하지
+    # 않음 - 두 데이터베이스가 물리적으로 분리된 뒤에도 코드가 그대로 동작해야 하기 때문).
+    operations_database_url: str | None = None
+
     # [v4.0] Collector(VM 인벤토리/전원상태 수집 백그라운드 루프)를 API 프로세스 안에서
     # 함께 띄울지 여부. Docker Compose 구성에서는 collector가 별도 컨테이너로 분리되어
     # 독립적으로 재시작/재배포되므로 API 서비스는 이 값을 false로 끈다(docker-compose.yml
@@ -59,3 +70,16 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def effective_operations_database_url(settings: Settings | None = None) -> str:
+    """실제로 Operations DB 연결에 사용할 접속 문자열.
+
+    settings.operations_database_url이 설정되어 있으면 그 값을, 비어 있으면(기본값)
+    settings.database_url(Billing DB와 동일한 물리 DB)을 그대로 반환한다 - 이 함수를
+    거쳐야만 "제로 설정 배포는 기존과 완전히 동일하게 동작"이 보장된다. app/database.py의
+    ops_engine이 이 값으로 만들어지며, 그 이후로는 billing과 ops가 같은 URL을 가리키는
+    경우에도 항상 서로 다른 엔진/세션 객체를 통해서만 접근한다.
+    """
+    settings = settings or get_settings()
+    return settings.operations_database_url or settings.database_url

@@ -74,10 +74,13 @@ select, input {
     var(--bg);
 }
 
+/* [v4.9] 기존에는 max-width가 1240px로 고정되어 있어 넓은 모니터에서도 화면 좌우에 큰
+   여백이 남았다 - min(...)으로 바꿔 "화면 너비의 96%까지는 계속 넓어지되, 초광폭 모니터에서
+   테이블/차트가 과도하게 늘어지지 않도록 1800px에서 상한을 둔다"로 개선했다. */
 main.view {
-  max-width: 1240px;
+  max-width: min(1800px, 96vw);
   margin: 0 auto;
-  padding: 24px 28px 56px;
+  padding: 24px clamp(16px, 3vw, 40px) 56px;
 }
 
 .topbar {

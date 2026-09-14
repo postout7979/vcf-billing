@@ -144,6 +144,8 @@
   <main id="view-admin" class="view" hidden>
     <nav class="admin-nav">
       <button class="admin-nav-btn active" data-admin-page="overview">개요</button>
+      <button class="admin-nav-btn" data-admin-page="projects">프로젝트</button>
+      <button class="admin-nav-btn" data-admin-page="downsizing">저성능 VM</button>
       <button class="admin-nav-btn" data-admin-page="tenants">테넌트 관리</button>
       <button class="admin-nav-btn" data-admin-page="users">사용자 관리</button>
       <button class="admin-nav-btn" data-admin-page="integrations">계정 연동</button>
@@ -201,11 +203,17 @@
         </div>
       </section>
 
-      <section class="card table-card">
-        <div class="card-head">
-          <h3>프로젝트 목록</h3>
-          <p class="muted">행을 클릭하면 VM별 상세 내역을 확인할 수 있습니다</p>
+    </section>
+
+    <!-- -------- [v4.9] 프로젝트 (기존 개요 화면의 "프로젝트 목록" 카드를 별도 탭으로 분리) -------- -->
+    <section id="admin-page-projects" class="admin-page" hidden>
+      <div class="page-head">
+        <div>
+          <h2>프로젝트 목록</h2>
+          <p class="muted">행을 클릭하면 VM별 상세 내역을 확인할 수 있습니다. 조회 기간/테넌트 필터는 화면 상단과 동일하게 적용됩니다.</p>
         </div>
+      </div>
+      <section class="card table-card">
         <div class="table-wrap">
           <table>
             <thead>
@@ -227,13 +235,18 @@
           </table>
         </div>
       </section>
+    </section>
 
-      <!-- [v4.7] 저사용 VM 다운사이징 권고 - v3.7에서 이미 수집 중인 평균 CPU/MEM 사용률 재사용 -->
-      <section class="card table-card">
-        <div class="card-head">
-          <h3>저사용 VM 다운사이징 권고</h3>
+    <!-- -------- [v4.9] 저성능 VM (기존 개요 화면의 "저사용 VM 다운사이징 권고" 카드를 별도
+         탭으로 분리 - v3.7에서 이미 수집 중인 평균 CPU/MEM 사용률을 그대로 재사용) -------- -->
+    <section id="admin-page-downsizing" class="admin-page" hidden>
+      <div class="page-head">
+        <div>
+          <h2>저성능 VM (다운사이징 권고)</h2>
           <p class="muted" id="admin-downsizing-note">-</p>
         </div>
+      </div>
+      <section class="card table-card">
         <div class="table-wrap">
           <table>
             <thead>
@@ -390,6 +403,10 @@
       </div>
 
       <section class="card">
+        <div class="page-head" style="margin-bottom: 8px;">
+          <h3 style="margin:0;">Billing 데이터베이스</h3>
+        </div>
+        <p class="muted small">테넌트/프로젝트/요금/사용자 계정을 저장하는 기본 데이터베이스입니다.</p>
         <div class="menu-grid">
           <div class="menu-card">
             <h4>현재 DB 상태</h4>
@@ -405,6 +422,32 @@
             <h4>외부 PostgreSQL 연결</h4>
             <p class="muted small">접속을 테스트하고, 현재 데이터를 외부 PostgreSQL로 복사(마이그레이션)합니다.</p>
             <button class="btn btn-ghost" id="external-db-open-btn">연결 관리</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- [v4.9 신규] Billing DB와 항상 논리적으로 분리되는 Operations DB(VM 인벤토리/전원상태
+           수집 데이터) 전용 설정 - 초기 설정 마법사 3단계와 동일한 엔드포인트를 재사용한다. -->
+      <section class="card">
+        <div class="page-head" style="margin-bottom: 8px;">
+          <h3 style="margin:0;">Operations 데이터베이스</h3>
+        </div>
+        <p class="muted small">VCF Operations에서 수집한 VM 인벤토리/전원상태 데이터 전용 데이터베이스입니다 (v4.9부터 Billing DB와 항상 논리적으로 분리됩니다 - 기본값은 Billing DB와 같은 물리 데이터베이스).</p>
+        <div class="menu-grid">
+          <div class="menu-card">
+            <h4>현재 DB 상태</h4>
+            <p class="muted small">엔진/접속 정보/전체 크기와 테이블별 행 수·크기를 확인합니다.</p>
+            <button class="btn btn-ghost" id="operations-database-status-open-btn">상태 보기</button>
+          </div>
+          <div class="menu-card">
+            <h4>같은 서버에 추가 DB 생성</h4>
+            <p class="muted small">Billing DB와 같은 PostgreSQL 서버에 Operations 전용 데이터베이스를 새로 만듭니다.</p>
+            <button class="btn btn-ghost" id="operations-database-local-setup-open-btn">추가 DB 생성</button>
+          </div>
+          <div class="menu-card">
+            <h4>외부 PostgreSQL 연결</h4>
+            <p class="muted small">접속을 테스트하고, Operations 데이터를 외부 PostgreSQL로 복사(마이그레이션)합니다.</p>
+            <button class="btn btn-ghost" id="operations-external-db-open-btn">연결 관리</button>
           </div>
         </div>
       </section>
@@ -443,12 +486,15 @@
 </div>
 
 <!-- ============ [v4.7] 데이터베이스 - 외부 PostgreSQL 연결 팝업 ============ -->
+<!-- [v4.9] Billing DB와 Operations DB 양쪽에서 공용으로 쓰는 팝업 - app.js의
+     openExternalDbModal(target)이 target("billing"|"operations")에 따라 제목/설명과
+     제출 대상 엔드포인트를 바꿔 끼운다. -->
 <div id="external-db-modal" class="modal-backdrop" hidden>
   <div class="modal modal-wide card">
     <div class="drilldown-head">
       <div>
-        <h3>외부 PostgreSQL 연결</h3>
-        <p class="muted">접속 테스트 및 데이터 마이그레이션</p>
+        <h3 id="external-db-modal-title">외부 PostgreSQL 연결</h3>
+        <p class="muted" id="external-db-modal-desc">접속 테스트 및 데이터 마이그레이션</p>
       </div>
       <button class="btn btn-ghost btn-sm" id="external-db-modal-close">닫기 ✕</button>
     </div>
@@ -521,38 +567,102 @@
   </div>
 </div>
 
-<!-- ============ [v4.8] 최초 로그인 - 로컬/외부 DB 선택 게이트 ============
+<!-- ============ [v4.8→v4.9] 최초 로그인 설정 마법사 ============
      admin이 최초 로그인한 직후 1회만 뜬다(app/db_admin.py의 AppState.initial_db_setup_seen).
      "로그인 전에 DB를 고른다"는 것 자체가 아키텍처상 불가능해서(로그인이 되려면 이미 DB가
      연결되어 있어야 함) 이 팝업으로 근사한다 - claude/vcf-billing-portal-design.md
-     "v4.8 개편" 참고. -->
+     "v4.8 개편"/"v4.9 개편" 참고. [v4.9] 관리자 로그인 비밀번호 변경(1단계) + Billing DB
+     선택(2단계, v4.8과 동일) + Operations DB 선택(3단계, 신규)의 3단계 마법사로 확장했다.
+     각 단계는 app.js의 wizard-* 함수들이 순서대로 보여준다(showWizardStep). -->
 <div id="initial-db-setup-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
-      <h3>데이터베이스 설정</h3>
+      <h3>초기 설정 마법사</h3>
+      <span class="muted small" id="wizard-step-indicator">1 / 3단계</span>
     </div>
-    <p class="muted small">
-      최초 관리자 로그인입니다. 지금 이미 연결되어 있는 로컬 데이터베이스를 계속 사용할지,
-      아니면 별도의 외부 PostgreSQL 서버로 옮겨서 사용할지 선택하세요. "로컬 DB 계속 사용"을
-      고르면 이 자리에서 곧바로 DB 계정 비밀번호를 정의하거나(기존 데이터 유지) 기존 데이터를
-      전체 초기화할 수 있습니다. 이 선택은 나중에 "데이터베이스" 메뉴에서 언제든 다시 진행할
-      수 있으니, 지금 결정하지 않아도 됩니다.
-    </p>
-    <div class="menu-grid">
-      <div class="menu-card">
-        <h4>로컬 DB 계속 사용</h4>
-        <p class="muted small">지금 연결된 DB를 그대로 사용합니다. 계정 비밀번호를 정하고, 필요하면 기존 데이터를 초기화할 수 있습니다.</p>
-        <button class="btn btn-primary" id="initial-setup-local-btn">로컬 DB 설정</button>
+
+    <!-- 1단계: 관리자 로그인 비밀번호 변경 -->
+    <section class="wizard-step" id="wizard-step-1">
+      <h4 style="margin-top:0;">1. 관리자 계정 비밀번호 변경</h4>
+      <p class="muted small">
+        최초 로그인입니다. 지금 로그인에 쓰는 admin 계정 비밀번호를 바꾸는 것을 권장합니다.
+        나중에 화면 우측 상단 "비밀번호 변경"에서 언제든 다시 바꿀 수 있으니, 지금 건너뛰어도
+        됩니다.
+      </p>
+      <form id="wizard-password-form">
+        <div class="field-row">
+          <label class="field-label" for="wizard-password-current">현재 비밀번호</label>
+          <input id="wizard-password-current" type="password" required />
+        </div>
+        <div class="field-row">
+          <label class="field-label" for="wizard-password-new">새 비밀번호</label>
+          <input id="wizard-password-new" type="password" required minlength="4" />
+        </div>
+        <div class="field-row">
+          <label class="field-label" for="wizard-password-new-confirm">새 비밀번호 확인</label>
+          <input id="wizard-password-new-confirm" type="password" required minlength="4" />
+        </div>
+        <p id="wizard-password-error" class="form-error" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost btn-sm" id="wizard-password-skip-btn">건너뛰기</button>
+          <button type="submit" class="btn btn-primary" id="wizard-password-submit-btn">변경하고 다음</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 2단계: Billing 데이터베이스 (v4.8과 동일한 선택지) -->
+    <section class="wizard-step" id="wizard-step-2" hidden>
+      <h4 style="margin-top:0;">2. Billing 데이터베이스</h4>
+      <p class="muted small">
+        프로젝트/요금/사용자 계정 등 과금 산정에 쓰이는 기본(Billing) 데이터베이스입니다.
+        지금 이미 연결되어 있는 로컬 데이터베이스를 계속 사용할지, 별도의 외부 PostgreSQL
+        서버로 옮겨서 사용할지 선택하세요. 이 선택은 나중에 "데이터베이스" 메뉴에서 언제든
+        다시 진행할 수 있으니, 지금 결정하지 않아도 됩니다.
+      </p>
+      <div class="menu-grid">
+        <div class="menu-card">
+          <h4>로컬 DB 계속 사용</h4>
+          <p class="muted small">지금 연결된 DB를 그대로 사용합니다. 계정 비밀번호를 정하고, 필요하면 기존 데이터를 초기화할 수 있습니다.</p>
+          <button class="btn btn-primary" id="wizard-billing-local-btn">로컬 DB 설정</button>
+        </div>
+        <div class="menu-card">
+          <h4>외부 DB 연동</h4>
+          <p class="muted small">별도의 외부 PostgreSQL 서버로 데이터를 옮겨서 사용합니다.</p>
+          <button class="btn btn-ghost" id="wizard-billing-external-btn">외부 DB 연동</button>
+        </div>
       </div>
-      <div class="menu-card">
-        <h4>외부 DB 연동</h4>
-        <p class="muted small">별도의 외부 PostgreSQL 서버로 데이터를 옮겨서 사용합니다.</p>
-        <button class="btn btn-ghost" id="initial-setup-external-btn">외부 DB 연동</button>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost btn-sm" id="wizard-step2-back-btn">이전</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="wizard-step2-skip-btn">나중에 결정 (다음 단계로)</button>
       </div>
-    </div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-ghost btn-sm" id="initial-setup-skip-btn">나중에 결정 (건너뛰기)</button>
-    </div>
+    </section>
+
+    <!-- 3단계: [v4.9 신규] Operations 데이터베이스 -->
+    <section class="wizard-step" id="wizard-step-3" hidden>
+      <h4 style="margin-top:0;">3. Operations 데이터베이스</h4>
+      <p class="muted small">
+        VCF Operations에서 수집하는 VM 인벤토리/전원상태 데이터를 저장할 위치입니다. v4.9부터
+        Billing 데이터베이스와 항상 논리적으로 분리되어 있으며, 지금 고르지 않아도 기본값으로
+        Billing DB와 같은 물리 데이터베이스를 계속 사용합니다. 이 선택도 나중에 "데이터베이스"
+        메뉴에서 언제든 다시 진행할 수 있습니다.
+      </p>
+      <div class="menu-grid">
+        <div class="menu-card">
+          <h4>같은 서버에 추가 DB 생성</h4>
+          <p class="muted small">Billing DB와 같은 PostgreSQL 서버에 Operations 전용 데이터베이스를 새로 만듭니다 (Billing DB가 SQLite면 대신 로컬 파일을 하나 더 만듭니다).</p>
+          <button class="btn btn-primary" id="wizard-ops-local-btn">추가 DB 생성</button>
+        </div>
+        <div class="menu-card">
+          <h4>외부 DB 연동</h4>
+          <p class="muted small">별도의 외부 PostgreSQL 서버로 Operations 데이터를 옮겨서 사용합니다.</p>
+          <button class="btn btn-ghost" id="wizard-ops-external-btn">외부 DB 연동</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost btn-sm" id="wizard-step3-back-btn">이전</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="wizard-step3-skip-btn">나중에 결정 (완료)</button>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -560,7 +670,7 @@
      최초 설정 게이트의 "로컬 DB 설정" 버튼과, "데이터베이스" 탭의 "현재 DB 상태" 팝업 안
      버튼에서 공용으로 연다(언제든 다시 비밀번호를 바꾸거나 초기화할 수 있도록). -->
 <div id="local-db-setup-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
       <h3>로컬 DB 설정</h3>
       <button class="btn btn-ghost btn-sm" id="local-db-setup-modal-close">✕</button>
@@ -595,9 +705,71 @@
   </div>
 </div>
 
+<!-- ============ [v4.9] Operations DB - 현재 상태 팝업 ============
+     "데이터베이스" 탭의 "Operations 데이터베이스" 섹션에서 연다 - Billing DB용
+     #database-status-modal과 동일한 구조를 GET /admin/operations-database로 채운다. -->
+<div id="operations-database-status-modal" class="modal-backdrop" hidden>
+  <div class="modal modal-wide card">
+    <div class="drilldown-head">
+      <div>
+        <h3>현재 연결된 Operations 데이터베이스</h3>
+        <p class="muted">VM 인벤토리/전원상태 데이터가 저장되는 DB 정보입니다.</p>
+      </div>
+      <div class="drilldown-actions">
+        <button class="btn btn-ghost btn-sm" id="operations-database-status-refresh-btn">새로고침</button>
+        <button class="btn btn-ghost btn-sm" id="operations-database-status-modal-close">닫기 ✕</button>
+      </div>
+    </div>
+    <div id="operations-database-current-kpis" class="kpi-grid"></div>
+    <div class="table-wrap" style="margin-top: 12px;">
+      <table>
+        <thead>
+          <tr>
+            <th>테이블</th>
+            <th>행 수</th>
+            <th>크기</th>
+          </tr>
+        </thead>
+        <tbody id="operations-database-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============ [v4.9] Operations DB - 로컬 추가 데이터베이스 생성 팝업 ============
+     "데이터베이스" 탭의 "Operations 데이터베이스" 섹션과, 초기 설정 마법사 3단계에서
+     공용으로 연다. -->
+<div id="operations-local-db-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="modal-head">
+      <h3>Operations DB - 로컬 추가 데이터베이스 생성</h3>
+      <button class="btn btn-ghost btn-sm" id="operations-local-db-modal-close">✕</button>
+    </div>
+    <p class="muted small">
+      Billing DB와 같은 PostgreSQL 서버에 Operations 전용 데이터베이스를 새로 생성합니다
+      (Billing DB가 SQLite 로컬 파일이면 대신 같은 방식의 로컬 파일을 하나 더 만듭니다).
+    </p>
+    <form id="operations-local-db-form">
+      <div class="field-row">
+        <label class="field-label" for="operations-local-db-name">새 데이터베이스 이름</label>
+        <input id="operations-local-db-name" type="text" placeholder="vcfbilling_ops (기본값)" />
+      </div>
+      <p id="operations-local-db-error" class="form-error" hidden></p>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" id="operations-local-db-submit-btn">생성</button>
+      </div>
+    </form>
+    <div id="operations-local-db-result" hidden style="margin-top: 16px;">
+      <p id="operations-local-db-message" class="form-note success"></p>
+      <p class="muted small" style="font-weight:600;">다음 단계:</p>
+      <ol id="operations-local-db-steps" class="muted small"></ol>
+    </div>
+  </div>
+</div>
+
 <!-- ============ 요금 단위 설정 모달 (관리자) ============ -->
 <div id="rate-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
       <h3>요금 단위 설정 — <span id="rate-modal-project">-</span></h3>
       <button class="btn btn-ghost btn-sm" id="rate-modal-close">✕</button>
@@ -649,7 +821,7 @@
 
 <!-- ============ 테넌트 생성/수정 모달 ============ -->
 <div id="tenant-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
       <h3 id="tenant-modal-title">새 테넌트 생성</h3>
       <button class="btn btn-ghost btn-sm" id="tenant-modal-close">✕</button>
@@ -771,7 +943,7 @@
 
 <!-- ============ 연동 계정 생성/수정 모달 ============ -->
 <div id="account-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
       <h3 id="account-modal-title">새 연동 계정</h3>
       <button class="btn btn-ghost btn-sm" id="account-modal-close">✕</button>
@@ -851,7 +1023,7 @@
 
 <!-- ============ [v4.5] 사용자 생성/수정 모달 (사용자 관리 화면) ============ -->
 <div id="user-modal" class="modal-backdrop" hidden>
-  <div class="modal card">
+  <div class="modal modal-wide card">
     <div class="modal-head">
       <h3 id="user-modal-title">새 사용자</h3>
       <button class="btn btn-ghost btn-sm" id="user-modal-close">✕</button>

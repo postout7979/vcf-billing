@@ -4,9 +4,12 @@ from __future__ import annotations
 import datetime as dt
 
 from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 
 from app.billing.aggregator import ProjectUsageResult, calendar_month_period, default_period, month_to_date_period
 from app.models import Project
+from app.ops_queries import count_vms_by_project, resolve_clusters, resolve_folders, resolve_tags
+from app.project_criteria import criteria_summary_from_ids, get_project_criteria_ids
 from app.schemas import (
     ClusterOut,
     DailyCostOut,
@@ -67,16 +70,27 @@ def parse_period(
     return default_period(days)
 
 
-def project_to_out(p: Project) -> ProjectOut:
-    """Project ORM 객체를 API 응답 스키마로 변환한다 (관리자/일반 사용자 라우터 공통 사용)."""
+def project_to_out(db: Session, ops_db: Session, p: Project) -> ProjectOut:
+    """Project ORM 객체를 API 응답 스키마로 변환한다 (관리자/일반 사용자 라우터 공통 사용).
+
+    [v4.9] 매칭 기준(Cluster/VMFolder/Tag) 실제 행과 배정된 VM 개수는 Operations DB에
+    있으므로, billing 세션(db)으로 기준 id를 먼저 구한 뒤 ops 세션(ops_db)에서 그 id로
+    실제 행을 조회해 조합한다.
+    """
+    criteria_ids = get_project_criteria_ids(db, p.id)
+    clusters = resolve_clusters(ops_db, criteria_ids["cluster_ids"])
+    folders = resolve_folders(ops_db, criteria_ids["folder_ids"])
+    tags = resolve_tags(ops_db, criteria_ids["tag_ids"])
+
     criteria = ProjectCriteriaOut(
-        clusters=[ClusterOut(id=c.id, external_id=c.external_id, name=c.name, vm_count=len(c.vms)) for c in p.clusters],
+        clusters=[ClusterOut(id=c.id, external_id=c.external_id, name=c.name, vm_count=len(c.vms)) for c in clusters],
         folders=[
             VMFolderOut(id=f.id, external_id=f.external_id, path=f.path, name=f.name, vm_count=len(f.vms))
-            for f in p.folders
+            for f in folders
         ],
-        tags=[TagOut(id=t.id, category=t.category, name=t.name, label=t.label) for t in p.tags],
+        tags=[TagOut(id=t.id, category=t.category, name=t.name, label=t.label) for t in tags],
     )
+    vm_count = count_vms_by_project(ops_db, [p.id]).get(p.id, 0)
     return ProjectOut(
         id=p.id,
         tenant_id=p.tenant_id,
@@ -86,8 +100,8 @@ def project_to_out(p: Project) -> ProjectOut:
         description=p.description,
         owner_email=p.owner_email,
         criteria=criteria,
-        criteria_summary=p.criteria_summary,
-        vm_count=len(p.vms),
+        criteria_summary=criteria_summary_from_ids(**criteria_ids),
+        vm_count=vm_count,
         rate_card=RateCardOut.model_validate(p.rate_card) if p.rate_card else None,
     )
 
